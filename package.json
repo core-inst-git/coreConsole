@@ -1,0 +1,12 @@
+{
+  "name": "coreconsole-root",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix GUI run dev",
+    "build": "npm --prefix GUI run build",
+    "dist": "npm --prefix GUI run dist",
+    "dist:mac": "npm --prefix GUI run dist:mac",
+    "dist:win": "npm --prefix GUI run dist:win",
+    "release:organize": "npm --prefix GUI run release:organize"
+  }
+}

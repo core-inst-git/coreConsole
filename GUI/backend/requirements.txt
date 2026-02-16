@@ -1,0 +1,5 @@
+pyserial
+websockets
+pyvisa
+pyvisa-py
+zeroconf

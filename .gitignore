@@ -1,0 +1,20 @@
+# Node
+GUI/node_modules/
+GUI/node_modules.bak_*/
+
+# Build artifacts
+GUI/renderer/dist/
+GUI/release/
+GUI/.electron-cache/
+GUI/dist/
+GUI/build/
+
+# Python
+**/__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# OS / editor
+.DS_Store
+.vscode/
