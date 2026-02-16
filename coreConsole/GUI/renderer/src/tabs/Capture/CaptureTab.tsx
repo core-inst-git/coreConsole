@@ -282,6 +282,10 @@ export default function CaptureTab({
           const rows = Array.isArray(msg.resources) ? (msg.resources as GpibResource[]) : [];
           setResources(rows);
           addLog(`GPIB scan complete: ${rows.length} resource(s)`);
+          const debugRows = Array.isArray(msg.debug) ? (msg.debug as unknown[]) : [];
+          for (const d of debugRows) {
+            addLog(`VISA: ${String(d)}`);
+          }
           if (rows.length === 0) {
             const py = String(msg.python_exe ?? 'unknown');
             const hint = String(msg.visa_backend_hint ?? 'default');
