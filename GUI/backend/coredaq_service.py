@@ -192,6 +192,7 @@ class CoreDAQBackend:
         self.gpib_model: Optional[str] = None
         self.gpib_backend: Optional[str] = None
         self.gpib_resource_backend: Dict[str, Optional[str]] = {}
+        self.gpib_scan_debug: List[str] = []
         self.visa_backend_hint: Optional[str] = str(os.getenv('COREDAQ_VISA_BACKEND', '')).strip() or None
 
         self.capture_state = 'idle'
@@ -586,16 +587,21 @@ class CoreDAQBackend:
         if pyvisa is None:
             raise RuntimeError('pyvisa is not installed; run pip install pyvisa')
 
+        debug_lines: List[str] = []
         rows: List[Dict[str, Optional[str]]] = []
         seen_resources: Set[str] = set()
         resource_backend: Dict[str, Optional[str]] = {}
 
         for backend in self._candidate_visa_backends():
             rm = None
+            backend_tag = backend or 'default'
             try:
                 rm = self._open_visa_manager(backend)
+                visalib = str(getattr(rm, 'visalib', 'unknown'))
                 resources = list(rm.list_resources())
-            except Exception:
+                debug_lines.append(f'[{backend_tag}] visalib={visalib} resources={len(resources)}')
+            except Exception as e:
+                debug_lines.append(f'[{backend_tag}] open/list failed: {e}')
                 resources = []
 
             try:
@@ -635,6 +641,7 @@ class CoreDAQBackend:
         self.gpib_resource_backend = resource_backend
         if self.gpib_resource and self.gpib_resource in resource_backend:
             self.gpib_backend = self._norm_visa_backend(resource_backend.get(self.gpib_resource))
+        self.gpib_scan_debug = debug_lines
         return rows
 
     def _gpib_query(self, resource: str, cmd: str) -> Dict[str, Optional[str]]:
@@ -1395,6 +1402,7 @@ class CoreDAQBackend:
                             'ok': True,
                             'error': None,
                             'resources': rows,
+                            'debug': self.gpib_scan_debug,
                             'python_exe': sys.executable,
                             'visa_backend_hint': self.visa_backend_hint or 'default',
                         }))
