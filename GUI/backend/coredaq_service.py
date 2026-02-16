@@ -43,6 +43,7 @@ SWEEP_SAMPLE_RATE_MAX_HZ = 100_000
 SWEEP_TRANSFER_OVERHEAD_S = 1.2
 LIVE_STREAM_TARGET_HZ = 500
 LIVE_STREAM_PERIOD_S = 1.0 / float(LIVE_STREAM_TARGET_HZ)
+STREAM_MAX_CONSEC_ERRORS = 5
 COREDAQ_READY_STATE = 4
 DISCOVERY_INTERVAL_S = 2.0
 COREDAQ_HINTS = ('coredaq', 'core instrumentation', 'core_instrumentation')
@@ -164,6 +165,9 @@ class DeviceSession:
     room_temp_c: Optional[float] = None
     room_humidity_pct: Optional[float] = None
     busy: bool = False
+    stream_error_streak: int = 0
+    last_stream_error: str = ''
+    last_stream_error_ts: float = 0.0
 
 
 class CoreDAQBackend:
@@ -1072,15 +1076,19 @@ class CoreDAQBackend:
                     continue
 
                 try:
+                    power_w: Optional[Any] = None
                     if s.frontend_type == CoreDAQ.FRONTEND_LINEAR and s.autogain_enabled:
                         if (time.time() - s.last_autogain) > 1.0:
                             try:
-                                _ = await asyncio.to_thread(s.dev.snapshot_W, n_frames=1, autogain=True)
+                                # Reuse this snapshot for streaming so autogain does not
+                                # trigger an extra USB transaction in the same cycle.
+                                power_w = await asyncio.to_thread(s.dev.snapshot_W, n_frames=1, autogain=True)
                                 s.last_autogain = time.time()
                             except Exception:
-                                pass
+                                power_w = None
 
-                    power_w = await asyncio.to_thread(s.dev.snapshot_W, n_frames=1)
+                    if power_w is None:
+                        power_w = await asyncio.to_thread(s.dev.snapshot_W, n_frames=1)
                     if isinstance(power_w, tuple):
                         power_w = power_w[0]
                     if not isinstance(power_w, (list, tuple)) or len(power_w) < 4:
@@ -1093,8 +1101,15 @@ class CoreDAQBackend:
                         'ts': time.time(),
                         'ch': [float(power_w[i]) for i in range(4)],
                     })
-                except Exception:
-                    self._drop_session(s.device_id)
+                    s.stream_error_streak = 0
+                    s.last_stream_error = ''
+                    s.last_stream_error_ts = 0.0
+                except Exception as exc:
+                    s.stream_error_streak += 1
+                    s.last_stream_error = str(exc)
+                    s.last_stream_error_ts = time.time()
+                    if s.stream_error_streak >= STREAM_MAX_CONSEC_ERRORS:
+                        self._drop_session(s.device_id)
 
             # Keep UI stream responsive; actual loop rate is bounded by serial round-trip.
             await asyncio.sleep(LIVE_STREAM_PERIOD_S)

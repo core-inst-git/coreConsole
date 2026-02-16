@@ -58,25 +58,25 @@ class CoreDAQ:
 
     # Nominal maximum recommended optical power per gain (watts), UI guidance only
     GAIN_MAX_POWER_W = [
-        4e-3,      # G0: 4 mW
-        2e-3,      # G1: 2 mW
-        800e-6,    # G2: 800 µW
-        400e-6,    # G3: 400 µW
-        80e-6,     # G4: 80 µW
-        40e-6,     # G5: 40 µW
-        4e-6,      # G6: 4 µW
-        400e-9,    # G7: 400 nW
+        5e-3,      # G0: 5 mW
+        1e-3,      # G1: 1 mW
+        500e-6,    # G2: 500 µW
+        100e-6,    # G3: 100 µW
+        50e-6,     # G4: 50 µW
+        10e-6,     # G5: 10 µW
+        5e-6,      # G6: 5 µW
+        500e-9,    # G7: 500 nW
     ]
 
     GAIN_LABELS = [
-        "4 mW",
-        "2 mW",
-        "800 µW",
-        "400 µW",
-        "80 µW",
-        "40 µW",
-        "4 µW",
-        "400 nW",
+        "5 mW",
+        "1 mW",
+        "500 µW",
+        "100 µW",
+        "50 µW",
+        "10 µW",
+        "5 µW",
+        "500 nW",
     ]
 
     @classmethod
@@ -1054,24 +1054,32 @@ class CoreDAQ:
         # ---------- LINEAR frontend ----------
         if self._frontend_type == self.FRONTEND_LINEAR:
             if autogain:
+                # Convert decision thresholds to ADC-code space so autogain logic
+                # is not affected by mV display rounding.
+                min_code = int(math.ceil(float(min_mv) / self.ADC_LSB_MV))
+                max_code = int(math.floor(float(max_mv) / self.ADC_LSB_MV))
+                if min_code < 0:
+                    min_code = 0
+                if max_code < min_code:
+                    max_code = min_code
+
                 for _ in range(max_iters):
-                    mv_now, gains = self.snapshot_mV(
+                    codes_now, gains = self.snapshot_adc_zeroed(
                         n_frames=n_frames,
                         timeout_s=timeout_s,
                         poll_hz=poll_hz,
-                        use_zero=None
                     )
                     changed = False
 
                     for ch in range(4):
-                        vabs = abs(float(mv_now[ch]))
+                        code_abs = abs(int(codes_now[ch]))
                         g = int(gains[ch])
                         head = ch + 1
 
-                        if vabs < min_mv and g < 7:
+                        if code_abs < min_code and g < 7:
                             self.set_gain(head, g + 1)
                             changed = True
-                        elif vabs > max_mv and g > 0:
+                        elif code_abs > max_code and g > 0:
                             self.set_gain(head, g - 1)
                             changed = True
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import LiveChart from '@/components/LiveChart';
-import { DeviceStatus, sendControl, subscribeStream } from '@/coredaqClient';
+import { DeviceStatus, gainDisplayLabel, sendControl, subscribeStream } from '@/coredaqClient';
 import { VirtualChannelDef, VirtualMathType } from '@/virtualChannels';
 
 const CHANNEL_COLORS = [
@@ -528,14 +528,16 @@ export default function LivePlot({
                           className={`gain-btn ${gains[idx] === g ? 'active' : ''}`}
                           onClick={() => updateGain(idx, g)}
                           disabled={autoGain || !activeDevice}
+                          title={gainDisplayLabel(g)}
                         >
-                          {g}
+                          {`G${g}`}
                         </button>
                       ))}
                     </div>
                   </div>
                 ))}
               </div>
+              <div className="device-note">Gain ranges: {Array.from({ length: 8 }).map((_, g) => gainDisplayLabel(g)).join(' • ')}</div>
             </>
           ) : (
             <div className="device-note">
