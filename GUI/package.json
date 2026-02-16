@@ -21,6 +21,7 @@
     "dist": "npm run build:renderer && electron-builder",
     "dist:mac": "npm run build:renderer && electron-builder --mac",
     "dist:win": "npm run build:renderer && electron-builder --win",
+    "dist:win:portable": "npm run build:renderer && electron-builder --win portable --x64",
     "dist:linux": "npm run build:renderer && electron-builder --linux",
     "release:organize": "bash scripts/organize_release.sh",
     "release:all": "npm run build:renderer && npx electron-builder --mac && npx electron-builder --win --x64 && npm run release:organize"

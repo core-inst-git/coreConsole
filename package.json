@@ -12,6 +12,7 @@
     "dist": "npm --prefix GUI run dist",
     "dist:mac": "npm --prefix GUI run dist:mac",
     "dist:win": "npm --prefix GUI run dist:win",
+    "dist:win:portable": "npm --prefix GUI run dist:win:portable",
     "release:organize": "npm --prefix GUI run release:organize"
   }
 }
