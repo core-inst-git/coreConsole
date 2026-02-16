@@ -13,7 +13,7 @@ export const GAIN_RANGE_LABELS = [
 
 export function gainDisplayLabel(gainIndex: number): string {
   const idx = Math.max(0, Math.min(GAIN_RANGE_LABELS.length - 1, Number(gainIndex) || 0));
-  return `G${idx} (${GAIN_RANGE_LABELS[idx]})`;
+  return GAIN_RANGE_LABELS[idx];
 }
 
 export type DeviceStatus = {

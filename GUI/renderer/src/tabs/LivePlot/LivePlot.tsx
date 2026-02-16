@@ -521,23 +521,21 @@ export default function LivePlot({
                       <span className="gain-dot" style={{ background: CHANNEL_COLORS[idx % CHANNEL_COLORS.length] }} />
                       <span>{`CH${idx + 1}`}</span>
                     </div>
-                    <div className={`gain-buttons ${autoGain ? 'disabled' : ''}`}>
+                    <select
+                      className="gain-select"
+                      value={gains[idx]}
+                      onChange={(e) => updateGain(idx, Number(e.target.value))}
+                      disabled={autoGain || !activeDevice}
+                    >
                       {Array.from({ length: 8 }).map((__, g) => (
-                        <button
-                          key={`gain-${idx}-${g}`}
-                          className={`gain-btn ${gains[idx] === g ? 'active' : ''}`}
-                          onClick={() => updateGain(idx, g)}
-                          disabled={autoGain || !activeDevice}
-                          title={gainDisplayLabel(g)}
-                        >
-                          {`G${g}`}
-                        </button>
+                        <option key={`gain-${idx}-${g}`} value={g}>
+                          {gainDisplayLabel(g)}
+                        </option>
                       ))}
-                    </div>
+                    </select>
                   </div>
                 ))}
               </div>
-              <div className="device-note">Gain ranges: {Array.from({ length: 8 }).map((_, g) => gainDisplayLabel(g)).join(' • ')}</div>
             </>
           ) : (
             <div className="device-note">

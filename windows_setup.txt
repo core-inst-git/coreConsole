@@ -17,12 +17,17 @@ set COREDAQ_PYTHON=C:\path\to\conda\envs\coreDAQ\python.exe
 setx COREDAQ_PYTHON "C:\path\to\conda\envs\coreDAQ\python.exe"
 
 Part B - Node/Electron frontend
-1) Verify Node.js 20 LTS installed:
+1) Install and use Node.js 20 LTS:
+
+nvm install 20
+nvm use 20
+
+2) Verify versions:
 
 node -v
 npm -v
 
-2) Install GUI dependencies and run dev:
+3) Install GUI dependencies and run dev:
 
 cd <path>\coreConsole\GUI
 npm install
