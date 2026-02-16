@@ -1,0 +1,5 @@
+../Core/Src/state_machine.c:7:6:SM_Init	0	static
+../Core/Src/state_machine.c:11:6:SM_SetState	0	static
+../Core/Src/state_machine.c:15:13:SM_GetState	0	static
+../Core/Src/state_machine.c:20:9:SM_RequestTransfer	8	static
+../Core/Src/state_machine.c:29:13:SM_GetStateName	0	static

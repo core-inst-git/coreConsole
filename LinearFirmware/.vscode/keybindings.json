@@ -1,0 +1,8 @@
+[
+  {
+    "key": "ctrl+shift+d",
+    "command": "workbench.action.tasks.runTask",
+    "args": "coreDAQ: Enter DFU",
+    "when": "editorTextFocus"
+  }
+]

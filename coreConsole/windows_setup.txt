@@ -1,0 +1,35 @@
+coreConsole Windows Setup (Anaconda Prompt)
+
+Part A - Python/Conda backend
+1) Open Anaconda Prompt
+2) cd <path>\coreConsole
+3) Run:
+
+conda create -n coreDAQ python=3.11 -y
+conda activate coreDAQ
+python -m pip install --upgrade pip
+python -m pip install -r GUI\backend\requirements.txt h5py numpy matplotlib
+python -c "import sys; print(sys.executable)"
+
+Copy the printed python path and set COREDAQ_PYTHON:
+
+set COREDAQ_PYTHON=C:\path\to\conda\envs\coreDAQ\python.exe
+setx COREDAQ_PYTHON "C:\path\to\conda\envs\coreDAQ\python.exe"
+
+Part B - Node/Electron frontend
+1) Verify Node.js 20 LTS installed:
+
+node -v
+npm -v
+
+2) Install GUI dependencies and run dev:
+
+cd <path>\coreConsole\GUI
+npm install
+cd ..
+npm run dev
+
+Notes
+- If npm run dev cannot find Python, re-open the terminal so setx takes effect
+  or re-run the set COREDAQ_PYTHON command in the current terminal.
+- You can also set COREDAQ_PYTHON in the environment permanently via Windows System Settings.

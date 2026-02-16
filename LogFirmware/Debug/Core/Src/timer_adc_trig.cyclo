@@ -1,0 +1,17 @@
+../Core/Src/timer_adc_trig.c:12:17:calc_tim_clk_apb1	2
+../Core/Src/timer_adc_trig.c:26:13:clamp_float	3
+../Core/Src/timer_adc_trig.c:35:13:choose_psc_arr	10
+../Core/Src/timer_adc_trig.c:71:26:gpio_pb4_tim3ch1_init	1
+../Core/Src/timer_adc_trig.c:83:26:tim3_master_set_trgo	1
+../Core/Src/timer_adc_trig.c:90:26:tim3_reconfigure_core	4
+../Core/Src/timer_adc_trig.c:124:19:TIMER_ADC_TRIG_Init	4
+../Core/Src/timer_adc_trig.c:139:19:TIMER_ADC_TRIG_Start	2
+../Core/Src/timer_adc_trig.c:145:19:TIMER_ADC_TRIG_Stop	2
+../Core/Src/timer_adc_trig.c:151:19:TIMER_ADC_TRIG_SetFrequency	4
+../Core/Src/timer_adc_trig.c:161:19:TIMER_ADC_TRIG_SetDuty	2
+../Core/Src/timer_adc_trig.c:172:19:TIMER_ADC_TRIG_SetTRGO	1
+../Core/Src/timer_adc_trig.c:176:10:TIMER_ADC_TRIG_GetActualHz	1
+../Core/Src/timer_adc_trig.c:180:7:TIMER_ADC_TRIG_GetDuty	2
+../Core/Src/timer_adc_trig.c:188:8:TIMER_ADC_TRIG_IsRunning	1
+../Core/Src/timer_adc_trig.c:193:19:TIMER_ADC_TRIG_InitBusyIC	2
+../Core/Src/timer_adc_trig.c:219:28:TIMER_ADC_TRIG_BusyFallingCallback	1

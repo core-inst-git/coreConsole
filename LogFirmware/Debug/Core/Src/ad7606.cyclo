@@ -1,0 +1,11 @@
+../Core/Src/ad7606.c:26:6:CS_LOW	1
+../Core/Src/ad7606.c:27:6:CS_HIGH	1
+../Core/Src/ad7606.c:37:6:AD7606_Init	1
+../Core/Src/ad7606.c:50:6:AD7606_Reset	1
+../Core/Src/ad7606.c:65:6:SPI5_Ensure_Mode0_16bit_FullDuplex_SwNSS_Presc8	2
+../Core/Src/ad7606.c:99:6:SPI5_Ensure_Mode1_16bit_FullDuplex_SwNSS_Presc8	2
+../Core/Src/ad7606.c:136:6:AD7606_SetOversampling	2
+../Core/Src/ad7606.c:153:23:FRSTDATA_IS_HIGH	2
+../Core/Src/ad7606.c:158:6:SPI5_ClearRxFifo	2
+../Core/Src/ad7606.c:171:19:wait_frstdata_high	3
+../Core/Src/ad7606.c:180:5:AD7606_Read4Words_Tight	9

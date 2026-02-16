@@ -1,0 +1,9 @@
+../Core/Src/timer_control.c:8:17:tim3_get_clk_hz	16	static
+../Core/Src/timer_control.c:18:13:choose_psc_arr	72	static
+../Core/Src/timer_control.c:42:19:TIM3_ReinitPWM_IC	88	static
+../Core/Src/timer_control.c:90:10:TIM3_GetFreqHz	24	static
+../Core/Src/timer_control.c:100:19:TIM3_SetFreqHz	88	static
+../Core/Src/timer_control.c:141:6:TIM3_StartConvstPWM	8	static
+../Core/Src/timer_control.c:145:6:TIM3_StopConvstPWM	8	static
+../Core/Src/timer_control.c:149:6:TIM3_StartBusyCapture	8	static
+../Core/Src/timer_control.c:153:6:TIM3_StopBusyCapture	8	static

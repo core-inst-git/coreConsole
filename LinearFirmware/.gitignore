@@ -1,0 +1,39 @@
+# STM32CubeIDE / Eclipse build outputs
+Debug/
+Release/
+
+# GCC / linker artifacts
+*.o
+*.d
+*.su
+*.elf
+*.map
+*.list
+*.cyclo
+objects.list
+objects.mk
+sources.mk
+subdir.mk
+
+# Python artifacts (API tooling)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# IDE local metadata
+.settings/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.log
+
+# GUI (Electron/Vite)
+GUI/node_modules/
+GUI/node_modules.bak_*/
+GUI/renderer/dist/
+GUI/dist/
+GUI/.env*
+GUI/.electron-cache/
+GUI/package-lock.json.bak_*

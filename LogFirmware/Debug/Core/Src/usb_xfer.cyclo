@@ -1,0 +1,3 @@
+../Drivers/CMSIS/Include/core_cm7.h:2491:22:SCB_CleanDCache_by_Addr	2
+../Core/Src/usb_xfer.c:9:20:clean_dcache_range	1
+../Core/Src/usb_xfer.c:20:6:USB_TransferTask	5

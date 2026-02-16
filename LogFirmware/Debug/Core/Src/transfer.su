@@ -1,0 +1,6 @@
+../Drivers/CMSIS/Include/core_cm7.h:2464:22:SCB_InvalidateDCache_by_Addr	32	static,ignoring_inline_asm
+../Core/Src/transfer.c:26:12:queue_chunk	56	static
+../Core/Src/transfer.c:74:6:XFER_Init	4	static
+../Core/Src/transfer.c:82:19:XFER_ArmDump	16	static
+../Core/Src/transfer.c:94:6:XFER_OnTxDone	8	static
+../Core/Src/transfer.c:109:10:XFER_FramesRemaining	4	static

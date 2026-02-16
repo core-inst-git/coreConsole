@@ -1,0 +1,12 @@
+../Core/Src/timer_adc_trig.c:90:26:tim3_reconfigure_core	72	static
+../Core/Src/timer_adc_trig.c:124:19:TIMER_ADC_TRIG_Init	56	static
+../Core/Src/timer_adc_trig.c:139:19:TIMER_ADC_TRIG_Start	8	static
+../Core/Src/timer_adc_trig.c:145:19:TIMER_ADC_TRIG_Stop	8	static
+../Core/Src/timer_adc_trig.c:151:19:TIMER_ADC_TRIG_SetFrequency	16	static
+../Core/Src/timer_adc_trig.c:161:19:TIMER_ADC_TRIG_SetDuty	0	static
+../Core/Src/timer_adc_trig.c:172:19:TIMER_ADC_TRIG_SetTRGO	24	static
+../Core/Src/timer_adc_trig.c:176:10:TIMER_ADC_TRIG_GetActualHz	0	static
+../Core/Src/timer_adc_trig.c:180:7:TIMER_ADC_TRIG_GetDuty	0	static
+../Core/Src/timer_adc_trig.c:188:8:TIMER_ADC_TRIG_IsRunning	0	static
+../Core/Src/timer_adc_trig.c:193:19:TIMER_ADC_TRIG_InitBusyIC	56	static
+../Core/Src/timer_adc_trig.c:219:28:TIMER_ADC_TRIG_BusyFallingCallback	0	static

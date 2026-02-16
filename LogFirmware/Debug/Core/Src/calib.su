@@ -1,0 +1,5 @@
+../Core/Src/calib.c:529:5:LOGCAL_GetLUT	16	static
+../Core/Src/calib.c:565:16:cdc_try_tx	16	static
+../Core/Src/calib.c:571:6:CALDUMP_Start	24	static
+../Core/Src/calib.c:589:9:CALDUMP_IsActive	4	static
+../Core/Src/calib.c:598:6:CALDUMP_Task	136	static

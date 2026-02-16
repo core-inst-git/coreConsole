@@ -1,0 +1,80 @@
+{
+  "name": "coreconsole",
+  "version": "0.1.0",
+  "private": true,
+  "description": "coreConsole desktop app for coreDAQ",
+  "main": "electron/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
+    "dev:renderer": "vite --config renderer/vite.config.ts",
+    "dev:electron": "wait-on tcp:5173 && electron .",
+    "backend": "python backend/coredaq_service.py",
+    "build": "npm run build:renderer",
+    "build:renderer": "vite build --config renderer/vite.config.ts",
+    "preview": "vite preview --config renderer/vite.config.ts",
+    "pack": "npm run build:renderer && electron-builder --dir",
+    "dist": "npm run build:renderer && electron-builder",
+    "dist:mac": "npm run build:renderer && electron-builder --mac",
+    "dist:win": "npm run build:renderer && electron-builder --win",
+    "dist:linux": "npm run build:renderer && electron-builder --linux",
+    "release:organize": "bash scripts/organize_release.sh",
+    "release:all": "npm run build:renderer && npx electron-builder --mac && npx electron-builder --win --x64 && npm run release:organize"
+  },
+  "dependencies": {
+    "echarts": "^5.6.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "electron": "^31.2.1",
+    "electron-builder": "^24.13.3",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.8",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.coreinstrumentation.coreconsole",
+    "productName": "coreConsole",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "renderer/dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend/bin",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "zip"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "tar.gz"
+      ]
+    }
+  }
+}

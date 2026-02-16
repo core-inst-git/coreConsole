@@ -1,0 +1,9 @@
+../Core/Src/ad7606.c:26:6:CS_LOW	0	static
+../Core/Src/ad7606.c:27:6:CS_HIGH	0	static
+../Core/Src/ad7606.c:50:6:AD7606_Reset	8	static
+../Core/Src/ad7606.c:65:6:SPI5_Ensure_Mode0_16bit_FullDuplex_SwNSS_Presc8	0	static
+../Core/Src/ad7606.c:99:6:SPI5_Ensure_Mode1_16bit_FullDuplex_SwNSS_Presc8	0	static
+../Core/Src/ad7606.c:136:6:AD7606_SetOversampling	16	static
+../Core/Src/ad7606.c:37:6:AD7606_Init	8	static
+../Core/Src/ad7606.c:158:6:SPI5_ClearRxFifo	8	static
+../Core/Src/ad7606.c:180:5:AD7606_Read4Words_Tight	16	static

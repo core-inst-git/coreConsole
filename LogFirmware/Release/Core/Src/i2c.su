@@ -1,0 +1,13 @@
+../Core/Src/i2c.c:98:12:TCA_WriteReg	32	static
+../Core/Src/i2c.c:106:12:TCA_ReadReg	24	static
+../Core/Src/i2c.c:260:16:sht_crc8.constprop	0	static
+../Core/Src/i2c.c:69:6:MX_I2C3_Init	8	static
+../Core/Src/i2c.c:115:6:I2C_Init	8	static
+../Core/Src/i2c.c:131:5:TCA_WriteOutputs	16	static
+../Core/Src/i2c.c:139:5:TCA_ReadOutputs	24	static
+../Core/Src/i2c.c:239:12:ApplyGainWrite	32	static
+../Core/Src/i2c.c:252:5:I2C_ApplyGainNow	0	static
+../Core/Src/i2c.c:278:5:SHT_Read	40	static
+../Core/Src/i2c.c:304:6:I2C_RequestGain	0	static
+../Core/Src/i2c.c:314:6:I2C_RequestRefresh	0	static
+../Core/Src/i2c.c:319:6:I2C_Refresh	32	static

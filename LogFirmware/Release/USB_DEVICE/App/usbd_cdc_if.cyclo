@@ -1,0 +1,12 @@
+../USB_DEVICE/App/usbd_cdc_if.c:753:15:CDC_DeInit_HS	1
+../USB_DEVICE/App/usbd_cdc_if.c:767:15:CDC_Control_HS	1
+../USB_DEVICE/App/usbd_cdc_if.c:912:15:CDC_TransmitCplt_HS	1
+../USB_DEVICE/App/usbd_cdc_if.c:301:13:USB_CDC_Clear	2
+../USB_DEVICE/App/usbd_cdc_if.c:738:15:CDC_Init_HS	1
+../USB_DEVICE/App/usbd_cdc_if.c:204:13:u32_to_dec	6
+../USB_DEVICE/App/usbd_cdc_if.c:215:12:parse_u32.constprop	9
+../USB_DEVICE/App/usbd_cdc_if.c:326:6:Core_SoftReset	1
+../USB_DEVICE/App/usbd_cdc_if.c:886:9:CDC_Transmit_HS	2
+../USB_DEVICE/App/usbd_cdc_if.c:276:13:send_line	6
+../USB_DEVICE/App/usbd_cdc_if.c:413:13:process_cmd.constprop	133
+../USB_DEVICE/App/usbd_cdc_if.c:848:15:CDC_Receive_HS	6

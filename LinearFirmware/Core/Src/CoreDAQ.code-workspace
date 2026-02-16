@@ -1,0 +1,19 @@
+{
+	"folders": [
+		{
+			"name": "LinearFirmware",
+			"path": "../.."
+		},
+		{
+			"name": "LogFirmware",
+			"path": "../../../LogFirmware"
+		},
+		{
+			"name": "coreConsole",
+			"path": "../../../coreConsole"
+		}
+	],
+	"settings": {
+		"stm32cube-ide-clangd.path": "cube"
+	}
+}

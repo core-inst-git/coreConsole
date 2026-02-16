@@ -1,0 +1,7 @@
+../Core/Src/timer_control.c:42:19:TIM3_ReinitPWM_IC	8
+../Core/Src/timer_control.c:90:10:TIM3_GetFreqHz	4
+../Core/Src/timer_control.c:100:19:TIM3_SetFreqHz	6
+../Core/Src/timer_control.c:141:6:TIM3_StartConvstPWM	1
+../Core/Src/timer_control.c:145:6:TIM3_StopConvstPWM	1
+../Core/Src/timer_control.c:149:6:TIM3_StartBusyCapture	1
+../Core/Src/timer_control.c:153:6:TIM3_StopBusyCapture	1
