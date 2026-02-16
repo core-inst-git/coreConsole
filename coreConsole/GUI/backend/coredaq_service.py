@@ -168,6 +168,7 @@ class DeviceSession:
     stream_error_streak: int = 0
     last_stream_error: str = ''
     last_stream_error_ts: float = 0.0
+    last_status_poll_ts: float = 0.0
 
 
 class CoreDAQBackend:
@@ -961,6 +962,13 @@ class CoreDAQBackend:
         if s.busy:
             return True
 
+        # While streaming, reduce status command pressure on the serial link.
+        now = time.time()
+        is_streaming = self.stream_enabled_global and s.stream_enabled
+        min_poll_interval_s = 2.0 if is_streaming else 0.5
+        if (now - s.last_status_poll_ts) < min_poll_interval_s:
+            return True
+
         try:
             s.freq_hz = int(await asyncio.to_thread(s.dev.get_freq_hz))
             s.os_idx = int(await asyncio.to_thread(s.dev.get_oversampling))
@@ -1007,11 +1015,16 @@ class CoreDAQBackend:
         except Exception:
             s.room_humidity_pct = None
 
+        s.last_status_poll_ts = now
         return True
 
     async def status_loop(self) -> None:
         while True:
-            self._discover_devices()
+            any_streaming = any(self.stream_enabled_global and s.stream_enabled for s in self.devices.values())
+            # Discovery probes can block and cause visible stream stutter on Windows.
+            # Skip probing while actively streaming.
+            if not any_streaming:
+                self._discover_devices()
 
             for _did, sess in list(sorted(self.devices.items())):
                 await self._poll_session_status(sess)
