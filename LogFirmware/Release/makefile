@@ -64,8 +64,8 @@ all: main-build
 main-build: coreDAQ_firmware_LOG_v1.0.elf secondary-outputs
 
 # Tool invocations
-coreDAQ_firmware_LOG_v1.0.elf coreDAQ_firmware_LOG_v1.0.map: $(OBJS) $(USER_OBJS) /Users/ravipradip/LogFirmware/STM32F730Z8TX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "coreDAQ_firmware_LOG_v1.0.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"/Users/ravipradip/LogFirmware/STM32F730Z8TX_FLASH.ld" --specs=nosys.specs -Wl,-Map="coreDAQ_firmware_LOG_v1.0.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+coreDAQ_firmware_LOG_v1.0.elf coreDAQ_firmware_LOG_v1.0.map: $(OBJS) $(USER_OBJS) /Users/ravipradip/coreDev/LogFirmware/STM32F730Z8TX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "coreDAQ_firmware_LOG_v1.0.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m7 -T"/Users/ravipradip/coreDev/LogFirmware/STM32F730Z8TX_FLASH.ld" --specs=nosys.specs -Wl,-Map="coreDAQ_firmware_LOG_v1.0.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv5-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 
