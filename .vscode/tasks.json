@@ -1,0 +1,101 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "[Linear] CubeIDE: Build Release (ELF)",
+      "type": "shell",
+      "command": "/Applications/STM32CubeIDE.app/Contents/MacOS/STM32CubeIDE",
+      "args": [
+        "-nosplash",
+        "-application",
+        "org.eclipse.cdt.managedbuilder.core.headlessbuild",
+        "-data",
+        "/tmp/cubeide-workspace",
+        "-import",
+        "${workspaceFolder}/LinearFirmware",
+        "-build",
+        "coreDAQ_firmware_LINEAR_v1.0/Release"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/LinearFirmware"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "[Linear] Objcopy: Release (BIN)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "OBJCOPY=\"$(command -v arm-none-eabi-objcopy || true)\"; if [ -z \"$OBJCOPY\" ]; then OBJCOPY=\"$(find /Applications/STM32CubeIDE.app -type f -name arm-none-eabi-objcopy 2>/dev/null | head -n 1)\"; fi; if [ -z \"$OBJCOPY\" ]; then echo \"arm-none-eabi-objcopy not found\"; exit 1; fi; \"$OBJCOPY\" -O binary Release/coreDAQ_firmware_LINEAR_v1.0.elf Release/coreDAQ_firmware_LINEAR_v1.0.bin"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/LinearFirmware"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "[Linear] Build Release (ELF+BIN)",
+      "dependsOn": [
+        "[Linear] CubeIDE: Build Release (ELF)",
+        "[Linear] Objcopy: Release (BIN)"
+      ],
+      "dependsOrder": "sequence",
+      "group": "build"
+    },
+    {
+      "label": "[LOG] CubeIDE: Build Release (ELF)",
+      "type": "shell",
+      "command": "/Applications/STM32CubeIDE.app/Contents/MacOS/STM32CubeIDE",
+      "args": [
+        "-nosplash",
+        "-application",
+        "org.eclipse.cdt.managedbuilder.core.headlessbuild",
+        "-data",
+        "/tmp/cubeide-workspace",
+        "-import",
+        "${workspaceFolder}/LogFirmware",
+        "-build",
+        "coreDAQ_firmware_LOG_v1.0/Release"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/LogFirmware"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "[LOG] Objcopy: Release (BIN)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "OBJCOPY=\"$(command -v arm-none-eabi-objcopy || true)\"; if [ -z \"$OBJCOPY\" ]; then OBJCOPY=\"$(find /Applications/STM32CubeIDE.app -type f -name arm-none-eabi-objcopy 2>/dev/null | head -n 1)\"; fi; if [ -z \"$OBJCOPY\" ]; then echo \"arm-none-eabi-objcopy not found\"; exit 1; fi; \"$OBJCOPY\" -O binary Release/coreDAQ_firmware_LOG_v1.0.elf Release/coreDAQ_firmware_LOG_v1.0.bin"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/LogFirmware"
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "[LOG] Build Release (ELF+BIN)",
+      "dependsOn": [
+        "[LOG] CubeIDE: Build Release (ELF)",
+        "[LOG] Objcopy: Release (BIN)"
+      ],
+      "dependsOrder": "sequence",
+      "group": "build"
+    },
+    {
+      "label": "Build Firmware: Linear + LOG (Release, ELF+BIN)",
+      "dependsOn": [
+        "[Linear] Build Release (ELF+BIN)",
+        "[LOG] Build Release (ELF+BIN)"
+      ],
+      "dependsOrder": "sequence",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      }
+    }
+  ]
+}
