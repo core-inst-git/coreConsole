@@ -35,6 +35,7 @@ type GpibResource = {
   resource: string;
   idn?: string | null;
   model?: string | null;
+  backend?: string | null;
 };
 
 type LogLine = {
@@ -281,6 +282,11 @@ export default function CaptureTab({
           const rows = Array.isArray(msg.resources) ? (msg.resources as GpibResource[]) : [];
           setResources(rows);
           addLog(`GPIB scan complete: ${rows.length} resource(s)`);
+          if (rows.length === 0) {
+            const py = String(msg.python_exe ?? 'unknown');
+            const hint = String(msg.visa_backend_hint ?? 'default');
+            addLog(`No VISA resources found. Backend hint=${hint}, Python=${py}`);
+          }
         } else {
           addLog(`GPIB scan error: ${String(msg.error ?? 'Unknown')}`);
         }
@@ -647,6 +653,7 @@ export default function CaptureTab({
                   <option key={r.resource} value={r.resource}>
                     {r.resource}
                     {r.model ? ` (${r.model})` : ''}
+                    {r.backend ? ` [${r.backend}]` : ''}
                   </option>
                 ))}
               </select>

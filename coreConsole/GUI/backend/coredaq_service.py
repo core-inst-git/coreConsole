@@ -65,10 +65,12 @@ def detect_laser_model(idn: str) -> Optional[str]:
 class LaserSession:
     """Thin SCPI wrapper for Santec TSL lasers over VISA/GPIB."""
 
-    def __init__(self, resource: str, timeout_ms: int = 4000):
+    def __init__(self, resource: str, timeout_ms: int = 4000, visa_backend: Optional[str] = None):
         if pyvisa is None:
             raise RuntimeError('pyvisa is not installed')
-        self._rm = pyvisa.ResourceManager()
+        backend = str(visa_backend or '').strip()
+        self._visa_backend = backend
+        self._rm = pyvisa.ResourceManager(backend) if backend else pyvisa.ResourceManager()
         self._inst = self._rm.open_resource(resource)
         self._inst.timeout = timeout_ms
         self._inst.read_termination = '\n'
@@ -188,6 +190,9 @@ class CoreDAQBackend:
         self.gpib_resource: Optional[str] = None
         self.gpib_idn: Optional[str] = None
         self.gpib_model: Optional[str] = None
+        self.gpib_backend: Optional[str] = None
+        self.gpib_resource_backend: Dict[str, Optional[str]] = {}
+        self.visa_backend_hint: Optional[str] = str(os.getenv('COREDAQ_VISA_BACKEND', '')).strip() or None
 
         self.capture_state = 'idle'
         self.capture_message = ''
@@ -543,36 +548,93 @@ class CoreDAQBackend:
                 break
         return best
 
+    @staticmethod
+    def _norm_visa_backend(spec: Optional[str]) -> Optional[str]:
+        txt = str(spec or '').strip()
+        if txt.lower() in ('default', '<default>', 'auto'):
+            return None
+        return txt or None
+
+    def _candidate_visa_backends(self, preferred: Optional[str] = None) -> List[Optional[str]]:
+        # Prefer explicit selection, then env hint, then common defaults.
+        ordered: List[Optional[str]] = [
+            self._norm_visa_backend(preferred),
+            self._norm_visa_backend(self.gpib_backend),
+            self._norm_visa_backend(self.visa_backend_hint),
+            None,      # pyvisa default backend resolution
+            '@ivi',    # NI/Keysight style IVI backend
+            '@py',     # pyvisa-py pure python backend
+        ]
+        out: List[Optional[str]] = []
+        seen: Set[str] = set()
+        for spec in ordered:
+            key = spec or '<default>'
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(spec)
+        return out
+
+    @staticmethod
+    def _open_visa_manager(backend: Optional[str]):
+        if pyvisa is None:
+            raise RuntimeError('pyvisa is not installed; run pip install pyvisa')
+        spec = str(backend or '').strip()
+        return pyvisa.ResourceManager(spec) if spec else pyvisa.ResourceManager()
+
     def _gpib_scan(self) -> List[Dict[str, Optional[str]]]:
         if pyvisa is None:
             raise RuntimeError('pyvisa is not installed; run pip install pyvisa')
 
-        rm = pyvisa.ResourceManager()
         rows: List[Dict[str, Optional[str]]] = []
-        try:
-            resources = list(rm.list_resources())
-            for name in resources:
-                idn = None
-                model = None
-                try:
-                    inst = rm.open_resource(name)
-                    try:
-                        inst.timeout = 700
-                        inst.read_termination = '\n'
-                        inst.write_termination = '\n'
-                        idn = str(inst.query('*IDN?')).strip()
-                        model = detect_laser_model(idn)
-                    finally:
-                        inst.close()
-                except Exception:
+        seen_resources: Set[str] = set()
+        resource_backend: Dict[str, Optional[str]] = {}
+
+        for backend in self._candidate_visa_backends():
+            rm = None
+            try:
+                rm = self._open_visa_manager(backend)
+                resources = list(rm.list_resources())
+            except Exception:
+                resources = []
+
+            try:
+                for name in resources:
+                    if name in seen_resources:
+                        continue
+                    seen_resources.add(name)
+                    resource_backend[name] = backend
                     idn = None
                     model = None
-                rows.append({'resource': name, 'idn': idn, 'model': model})
-        finally:
-            try:
-                rm.close()
-            except Exception:
-                pass
+                    try:
+                        inst = rm.open_resource(name)
+                        try:
+                            inst.timeout = 700
+                            inst.read_termination = '\n'
+                            inst.write_termination = '\n'
+                            idn = str(inst.query('*IDN?')).strip()
+                            model = detect_laser_model(idn)
+                        finally:
+                            inst.close()
+                    except Exception:
+                        idn = None
+                        model = None
+                    rows.append({
+                        'resource': name,
+                        'idn': idn,
+                        'model': model,
+                        'backend': backend or 'default',
+                    })
+            finally:
+                if rm is not None:
+                    try:
+                        rm.close()
+                    except Exception:
+                        pass
+
+        self.gpib_resource_backend = resource_backend
+        if self.gpib_resource and self.gpib_resource in resource_backend:
+            self.gpib_backend = self._norm_visa_backend(resource_backend.get(self.gpib_resource))
         return rows
 
     def _gpib_query(self, resource: str, cmd: str) -> Dict[str, Optional[str]]:
@@ -585,7 +647,8 @@ class CoreDAQBackend:
         if not c:
             raise RuntimeError('Empty command')
 
-        with LaserSession(resource, timeout_ms=4000) as laser:
+        backend = self._norm_visa_backend(self.gpib_resource_backend.get(resource) or self.gpib_backend)
+        with LaserSession(resource, timeout_ms=4000, visa_backend=backend) as laser:
             if c.endswith('?'):
                 reply = laser.query(c)
             else:
@@ -595,6 +658,7 @@ class CoreDAQBackend:
         model = detect_laser_model(reply) if c.upper() in ('*IDN?', 'IDN?') else None
         return {
             'resource': resource,
+            'backend': backend or 'default',
             'command': c,
             'reply': reply,
             'model': model,
@@ -710,11 +774,13 @@ class CoreDAQBackend:
             session.dev.arm_acquisition(samples_total, use_trigger=True, trigger_rising=True)
             time.sleep(0.8)
 
+            visa_backend = self._norm_visa_backend(self.gpib_resource_backend.get(resource) or self.gpib_backend)
             try:
-                with LaserSession(resource, timeout_ms=5000) as laser:
+                with LaserSession(resource, timeout_ms=5000, visa_backend=visa_backend) as laser:
                     try:
                         self.gpib_idn = laser.query('*IDN?')
                         self.gpib_model = detect_laser_model(self.gpib_idn) or self.gpib_model
+                        self.gpib_backend = visa_backend
                         if not self.gpib_model:
                             raise RuntimeError(
                                 'Unsupported laser model. Supported models: TSL550, TSL570, TSL770.'
@@ -1071,6 +1137,7 @@ class CoreDAQBackend:
                 'gpib_resource': self.gpib_resource,
                 'gpib_idn': self.gpib_idn,
                 'gpib_model': self.gpib_model,
+                'gpib_backend': self.gpib_backend or (self.visa_backend_hint or 'default'),
                 'capture_state': self.capture_state,
                 'capture_message': self.capture_message,
             })
@@ -1328,6 +1395,8 @@ class CoreDAQBackend:
                             'ok': True,
                             'error': None,
                             'resources': rows,
+                            'python_exe': sys.executable,
+                            'visa_backend_hint': self.visa_backend_hint or 'default',
                         }))
 
                     elif action == 'gpib_select':
@@ -1335,12 +1404,14 @@ class CoreDAQBackend:
                         if not resource:
                             raise RuntimeError('No GPIB resource provided')
                         self.gpib_resource = resource
+                        self.gpib_backend = self._norm_visa_backend(self.gpib_resource_backend.get(resource))
                         await ws.send(json.dumps({
                             'type': 'control',
                             'action': action,
                             'ok': True,
                             'error': None,
                             'resource': resource,
+                            'backend': self.gpib_backend or 'default',
                         }))
 
                     elif action == 'gpib_query':
@@ -1348,6 +1419,7 @@ class CoreDAQBackend:
                         cmd = str(data.get('cmd', '')).strip()
                         out = await asyncio.to_thread(self._gpib_query, resource, cmd)
                         self.gpib_resource = out.get('resource') or self.gpib_resource
+                        self.gpib_backend = self._norm_visa_backend(out.get('backend'))
                         if cmd.upper() in ('*IDN?', 'IDN?'):
                             self.gpib_idn = out.get('reply')
                             self.gpib_model = out.get('model')
