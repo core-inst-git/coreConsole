@@ -60,6 +60,7 @@ Notes:
 cd GUI
 npm run dist:mac
 npm run dist:win
+npm run dist:win:portable
 npm run release:organize
 ```
 
