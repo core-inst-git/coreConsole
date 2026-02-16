@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "private": true,
   "description": "coreConsole desktop app for coreDAQ",
+  "engines": {
+    "node": "^20.0.0",
+    "npm": "^10.0.0"
+  },
+  "packageManager": "npm@10.8.2",
   "main": "electron/main.js",
   "scripts": {
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",

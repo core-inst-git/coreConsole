@@ -1008,7 +1008,7 @@ class CoreDAQ:
         autogain: bool = False,
         # autogain params (LINEAR only)
         min_mv: float = 100,
-        max_mv: float = 4700.0,
+        max_mv: float = 3500.0,
         max_iters: int = 10,
         settle_s: float = 0.01,
         return_debug: bool = False,
@@ -1022,6 +1022,8 @@ class CoreDAQ:
           - INGAAS: Uses slope/intercept (mV/W, mV) and current gains.
           - SILICON: Uses TIA gain model + Si responsivity curve.
           - If autogain=True, adjusts gains to keep |mV| within [min_mv, max_mv].
+            The default max_mv keeps headroom from ADC rail so downshift still
+            triggers when analog stages saturate below ±5 V full-scale.
           - Always subtracts per-channel ADC zero (factory or soft).
 
         LOG:

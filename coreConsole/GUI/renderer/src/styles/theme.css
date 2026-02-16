@@ -696,31 +696,19 @@ body {
   border-radius: 50%;
 }
 
-.gain-buttons {
-  display: grid;
-  grid-template-columns: repeat(8, 1fr);
-  gap: 6px;
-}
-
-.gain-btn {
-  background: #151c27;
+.gain-select {
+  width: 100%;
+  background: #0d141f;
+  color: var(--text);
   border: 1px solid var(--stroke-strong);
   border-radius: 8px;
-  padding: 6px 0;
-  color: var(--text-dim);
-  font-size: 11px;
-  cursor: pointer;
-  transition: all 0.2s ease;
+  padding: 8px 10px;
+  font-size: 12px;
+  outline: none;
 }
 
-.gain-btn.active {
-  color: #0b0f14;
-  background: #dfeaf2;
-  border-color: transparent;
-}
-
-.gain-buttons.disabled .gain-btn {
-  opacity: 0.45;
+.gain-select:disabled {
+  opacity: 0.55;
   cursor: not-allowed;
 }
 

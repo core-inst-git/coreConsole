@@ -8,7 +8,7 @@ Standalone desktop GUI for coreDAQ instruments. Firmware and GUI are intentional
 - `API/`: Python coreDAQ API used by backend
 
 ## Prerequisites
-- Node.js LTS + npm
+- Node.js 20 LTS + npm 10
 - Python 3.10+ with pip
 
 ## Development run
@@ -40,6 +40,8 @@ setx COREDAQ_PYTHON "C:\path\to\conda\envs\coreDAQ\python.exe"
 
 Part B - Node/Electron frontend
 ```bat
+nvm install 20
+nvm use 20
 node -v
 npm -v
 cd <path>\coreConsole\GUI
