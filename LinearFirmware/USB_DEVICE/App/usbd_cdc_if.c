@@ -587,7 +587,8 @@ static void process_cmd(char *line)
 
     // --- SNAPSHOT ---
     // SNAP <N>        : arm N-frame snapshot (1..64)
-    // SNAP?           : "OK <mV0> <mV1> <mV2> <mV3>" when ready, "BUSY" otherwise
+    // SNAP?           : "OK <adc0> <adc1> <adc2> <adc3> G=<g1> <g2> <g3> <g4>"
+    //                   when ready, "BUSY" otherwise
     // SNAP CANCEL     : cancel active snapshot
     if (s[0] == 'S' && s[1] == 'N' && s[2] == 'A' && s[3] == 'P' &&
         (s[4] == 0 || s[4] == ' ' || s[4] == '\t' || s[4] == '?')) {
@@ -599,7 +600,7 @@ static void process_cmd(char *line)
             HAL_StatusTypeDef st = ACQ_Snapshot_Read_adc(adc);
 
             if (st == HAL_OK) {
-                /* mV data */
+                /* ADC-code data + gain indices */
                 char out[128];
                 int n = snprintf(out, sizeof(out),
                                  "%ld %ld %ld %ld G=%u %u %u %u",

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import CaptureMiniChart from '@/components/CaptureMiniChart';
-import { DeviceStatus, sendControl, subscribeControl, subscribeStatus } from '@/coredaqClient';
+import { DeviceStatus, gainDisplayLabel, sendControl, subscribeControl, subscribeStatus } from '@/coredaqClient';
 import { VirtualChannelDef, VirtualMathType, parsePhysicalSourceId, physicalSourceId } from '@/virtualChannels';
 
 type Props = {
@@ -774,7 +774,7 @@ export default function CaptureTab({
                     >
                       {[0, 1, 2, 3, 4, 5, 6, 7].map((g) => (
                         <option key={g} value={g}>
-                          {g}
+                          {gainDisplayLabel(g)}
                         </option>
                       ))}
                     </select>

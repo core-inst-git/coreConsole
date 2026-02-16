@@ -1,5 +1,21 @@
 export type FrontendType = 'LINEAR' | 'LOG' | string;
 
+export const GAIN_RANGE_LABELS = [
+  '5 mW',
+  '1 mW',
+  '500 uW',
+  '100 uW',
+  '50 uW',
+  '10 uW',
+  '5 uW',
+  '500 nW',
+];
+
+export function gainDisplayLabel(gainIndex: number): string {
+  const idx = Math.max(0, Math.min(GAIN_RANGE_LABELS.length - 1, Number(gainIndex) || 0));
+  return `G${idx} (${GAIN_RANGE_LABELS[idx]})`;
+}
+
 export type DeviceStatus = {
   device_id: string;
   connected?: boolean;
