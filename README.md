@@ -31,6 +31,12 @@ cd coreConsole
 ./bootstrap.sh
 ```
 
+PowerShell (Windows):
+```powershell
+cd coreConsole
+powershell -ExecutionPolicy Bypass -File .\bootstrap.ps1
+```
+
 ## NI-VISA smoke tests
 ```bash
 cd coreConsole
