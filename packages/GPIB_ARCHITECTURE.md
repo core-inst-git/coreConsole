@@ -1,77 +1,55 @@
-# GPIB Integration Architecture (Electron + NI-VISA)
+# GPIB / VISA Architecture (Current)
 
-## Topology
+## Default runtime path
 
-Renderer -> Electron IPC -> Main -> stdio JSON-RPC -> visa-service -> N-API addon -> NI-VISA -> GPIB instruments
+Renderer -> WebSocket (`ws://127.0.0.1:8765`) -> `GUI/backend/coredaq_service.js` ->
+`laser-js` + `visa-addon` -> NI-VISA -> GPIB instruments
 
-Key boundary rules:
-- Renderer does not load NI or native modules.
-- Electron main does not load the native addon.
-- Only `visa-service` loads `visa_addon.node`.
+Key points:
+- CoreDAQ control/streaming/sweep orchestration is now in JS backend.
+- Laser sweep commands for TSL550/TSL570/TSL770 are in `packages/laser-js`.
+- Sweep control uses JS VISA path (no `pyvisa` in default mode).
+
+## Optional standalone VISA service path
+
+Renderer -> Electron IPC -> Main -> `visa-service` (stdio JSON-RPC) -> `visa-addon` -> NI-VISA
+
+This path is kept for standalone diagnostics/smoke testing (`packages/visa-service/examples/*`) and can be re-enabled with env flags:
+
+- `COREDAQ_ENABLE_GPIB_SERVICE=1`
+- `COREDAQ_DISABLE_GPIB_SERVICE=0`
 
 ## Package layout
 
-- `packages/visa-addon/` - N-API C++ addon exposing VISA calls
-- `packages/visa-service/` - Node JSON-RPC service over stdio
-- `packages/electron-app/` - wrapper package for `GUI` app commands
+- `packages/visa-addon/` - native N-API VISA bridge
+- `packages/visa-service/` - standalone JSON-RPC VISA process + smoke tests
+- `packages/laser-js/` - model-aware Santec TSL command library
 
-## RPC contract
+## Laser command handling
 
-Request (JSON per line):
+`laser-js` selects command mode by model:
+- `TSL550`, `TSL570`: nm-based sweep commands
+- `TSL770`: meter-based sweep commands (`WAV:UNIT 1` + SI units)
 
-```json
-{"id":"123","method":"query","params":{"sessionId":"...","command":"*IDN?\n"}}
-```
-
-Success:
-
-```json
-{"id":"123","ok":true,"result":{"data":"..."}}
-```
-
-Error:
-
-```json
-{"id":"123","ok":false,"error":{"code":"VISA_ERROR","message":"VI_ERROR_TMO"}}
-```
-
-Boot status lines:
-- `BOOT_OK` with health payload
-- `BOOT_ERROR` then process exits non-zero
-
-## Main IPC API exposed to renderer
-
-- `gpib:health`
-- `gpib:list`
-- `gpib:open`
-- `gpib:write`
-- `gpib:read`
-- `gpib:query`
-- `gpib:set-timeout`
-- `gpib:close`
-- `gpib:restart-service`
-
-Preload exposes these as `window.gpib.*`.
+Shared sweep flow:
+1) `*RST` + trigger/power/sweep setup
+2) `WAV:SWE 1` start
+3) wait capture duration + overhead
+4) `WAV:SWE 0` stop
 
 ## Packaging notes
 
-- `visa-service` copied to app resources as `resources/visa-service`
-- `visa-addon` binary copied to `resources/visa-addon/build/Release/*.node`
-- Native module excluded from `asar` via `asarUnpack` (`**/*.node`)
+Windows/macOS packaging includes:
+- JS backend (`GUI/backend/coredaq_service.js`)
+- API files (`resources/API`)
+- laser-js (`resources/laser-js`)
+- visa-addon binary (`resources/visa-addon/build/Release/*.node`)
 
-## Driver checks
+JS backend receives runtime paths from Electron main via env:
+- `COREDAQ_API_PATH`
+- `COREDAQ_LASER_JS_PATH`
+- `COREDAQ_VISA_ADDON_PATH`
 
-`visa-service` boot performs:
-1) NI-VISA loader check (`visa64.dll` dynamic load)
-2) `viOpenDefaultRM` functional check
-3) resource enumeration and `gpibDetected` status
+## Current limitation
 
-If NI-VISA is missing, boot returns `BOOT_ERROR` with `checkedPaths` and install guidance.
-
-## Standalone smoke tests
-
-Use these before wiring full UI workflows:
-
-- `packages/visa-service/examples/visa_smoke.js` (cross-platform Node RPC client)
-- `packages/visa-service/examples/run_windows.ps1`
-- `packages/visa-service/examples/run_macos.sh`
+`action: sweep_save_h5` in JS backend currently writes a JSON export (`.h5.json`) containing full sweep metadata and channel arrays. Native HDF5 writer migration is pending.

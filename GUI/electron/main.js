@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { Menu } = require('electron');
 const { spawn } = require('child_process');
-const { VisaServiceClient, isWin } = require('./visaServiceClient');
+const { VisaServiceClient } = require('./visaServiceClient');
 
 const isDev = !app.isPackaged;
 const devURL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
@@ -207,48 +207,56 @@ function buildMenu() {
 }
 
 function startBackend() {
-  if (app.isPackaged) {
-    const exeName = process.platform === 'win32' ? 'coredaq_service.exe' : 'coredaq_service';
-    const backendExe = path.join(process.resourcesPath, 'backend', exeName);
-    backendProc = spawn(backendExe, [], { stdio: 'inherit' });
-    backendProc.on('error', (err) => {
-      console.error(`Failed to start packaged backend at ${backendExe}`, err);
-    });
-    return;
-  }
-
-  let python = process.env.COREDAQ_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
-  let pythonArgs = [];
-  let pythonSource = 'default';
-  if (process.platform === 'win32') {
-    const condaPrefix = process.env.CONDA_PREFIX || '';
-    const condaPython = condaPrefix ? path.join(condaPrefix, 'python.exe') : '';
-    if (condaPython && fs.existsSync(condaPython)) {
-      // Prefer the currently activated conda env to avoid stale system/user python.
-      python = condaPython;
-      pythonSource = 'CONDA_PREFIX';
-    } else if (process.env.COREDAQ_PYTHON) {
-      python = process.env.COREDAQ_PYTHON;
-      pythonSource = 'COREDAQ_PYTHON';
-    } else {
-      // Fallback to py launcher on Windows when plain "python" is missing.
-      python = 'py';
-      pythonArgs = ['-3'];
-      pythonSource = 'py -3';
+  const startJsBackend = () => {
+    const script = path.join(__dirname, '../backend/coredaq_service.js');
+    if (!fs.existsSync(script)) {
+      console.error(`[coreConsole] JS backend script not found: ${script}`);
+      return;
     }
-  }
-  const script = path.join(__dirname, '../backend/coredaq_service.py');
-  console.log(`[coreConsole] Starting backend with ${pythonSource}: ${python}`);
-  backendProc = spawn(python, [...pythonArgs, script], { stdio: 'inherit' });
-  backendProc.on('error', (err) => {
-    console.error(`Failed to start dev backend with ${python}`, err);
-  });
+
+    const env = {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1',
+    };
+
+    const apiPath = isDev
+      ? path.resolve(__dirname, '..', '..', 'API')
+      : path.join(process.resourcesPath, 'API');
+    const laserJsPath = isDev
+      ? path.resolve(__dirname, '..', '..', 'packages', 'laser-js')
+      : path.join(process.resourcesPath, 'laser-js');
+    const guiNodeModulesPath = isDev
+      ? path.resolve(__dirname, '..', 'node_modules')
+      : path.join(process.resourcesPath, 'app.asar', 'node_modules');
+    if (fs.existsSync(apiPath)) env.COREDAQ_API_PATH = apiPath;
+    if (fs.existsSync(laserJsPath)) env.COREDAQ_LASER_JS_PATH = laserJsPath;
+    if (fs.existsSync(guiNodeModulesPath)) env.COREDAQ_GUI_NODE_MODULES_PATH = guiNodeModulesPath;
+
+    const addonPath = isDev
+      ? path.resolve(__dirname, '..', '..', 'packages', 'visa-addon', 'build', 'Release', 'visa_addon.node')
+      : path.join(process.resourcesPath, 'visa-addon', 'build', 'Release', 'visa_addon.node');
+    if (fs.existsSync(addonPath)) {
+      env.COREDAQ_VISA_ADDON_PATH = addonPath;
+      env.VISA_ADDON_PATH = addonPath;
+    }
+
+    backendProc = spawn(process.execPath, [script], {
+      stdio: 'inherit',
+      env,
+      cwd: path.join(__dirname, '..'),
+    });
+    console.log(`[coreConsole] Starting JS backend: ${script}`);
+    backendProc.on('error', (err) => {
+      console.error(`Failed to start JS backend at ${script}`, err);
+    });
+  };
+  startJsBackend();
 }
 
 function shouldEnableVisaService() {
   if (process.env.COREDAQ_DISABLE_GPIB_SERVICE === '1') return false;
   if (process.env.COREDAQ_ENABLE_GPIB_SERVICE === '1') return true;
-  return isWin();
+  return false;
 }
 
 function showVisaBootErrorDialog(err) {

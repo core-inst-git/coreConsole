@@ -8,6 +8,9 @@ GUI/release/
 GUI/.electron-cache/
 GUI/dist/
 GUI/build/
+GUI/backend/bin/
+GUI/backend/build/
+GUI/backend/dist/
 
 # Python
 **/__pycache__/

@@ -287,9 +287,9 @@ export default function CaptureTab({
             addLog(`VISA: ${String(d)}`);
           }
           if (rows.length === 0) {
-            const py = String(msg.python_exe ?? 'unknown');
-            const hint = String(msg.visa_backend_hint ?? 'default');
-            addLog(`No VISA resources found. Backend hint=${hint}, Python=${py}`);
+            const backendExe = String(msg.node_exe ?? msg.python_exe ?? 'unknown');
+            const hint = String(msg.backend ?? msg.visa_backend_hint ?? 'default');
+            addLog(`No VISA resources found. Backend hint=${hint}, Runtime=${backendExe}`);
           }
         } else {
           addLog(`GPIB scan error: ${String(msg.error ?? 'Unknown')}`);

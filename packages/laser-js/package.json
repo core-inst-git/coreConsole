@@ -1,0 +1,11 @@
+{
+  "name": "@coredaq/laser-js",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Santec TSL laser command library for coreConsole",
+  "type": "commonjs",
+  "main": "index.js",
+  "engines": {
+    "node": ">=20"
+  }
+}
