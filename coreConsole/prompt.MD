@@ -14,7 +14,7 @@ CoreDAQ is a photonics/electronics measurement instrument platform with:
 
 - STM32F7 firmware (separate repos for LINEAR and LOG frontends)
 - Python device API for serial command/control and data transfer
-- Electron + React desktop app (`coreConsole`) with Python backend service
+- Electron + React desktop app (`coreConsole`) with JavaScript backend service
 - Optional GPIB/VISA laser integration for triggered wavelength sweeps
 
 Key user goals:
@@ -33,7 +33,7 @@ Primary GUI/API repo:
 - `coreConsole/API/coredaq_python_api.py` -> main host API (serial protocol abstraction + conversion logic)
 - `coreConsole/API/enter_dfu.py` -> DFU entry helper
 - `coreConsole/API/serial_console.py` -> terminal console helper
-- `coreConsole/GUI/backend/coredaq_service.py` -> backend websocket service
+- `coreConsole/GUI/backend/coredaq_service.js` -> backend websocket service
 - `coreConsole/GUI/electron/main.js` -> Electron main process
 - `coreConsole/GUI/electron/preload.js` -> secure renderer bridge
 - `coreConsole/GUI/renderer/src/` -> React frontend tabs/components
@@ -77,7 +77,7 @@ Firmware compatibility:
 Desktop runtime chain:
 
 1. Electron starts and launches backend service
-2. Python backend discovers serial CoreDAQ devices
+2. JavaScript backend discovers serial CoreDAQ devices
 3. React renderer connects to backend via local websocket (`ws://127.0.0.1:8765`)
 4. Backend streams power snapshots and status to renderer
 5. Renderer sends control/console commands back to backend
@@ -89,7 +89,7 @@ Data/control planes:
 - Status: websocket JSON messages (`type: status`)
 - Console: websocket JSON messages (`type: console`)
 
-## 5) Backend Service Responsibilities (`coredaq_service.py`)
+## 5) Backend Service Responsibilities (`coredaq_service.js`)
 
 `CoreDAQBackend` handles:
 
@@ -244,7 +244,7 @@ When modifying platform code:
 
 After any non-trivial change:
 
-1. `python3 -m py_compile API/coredaq_python_api.py GUI/backend/coredaq_service.py`
+1. `node --check GUI/backend/coredaq_service.js`
 2. `./GUI/node_modules/.bin/tsc -p GUI/renderer/tsconfig.json --noEmit`
 3. `npm run build`
 4. Manual sanity:
@@ -270,4 +270,3 @@ When assigned a new feature/bug:
 ---
 
 If you need to reason about any behavior, prioritize **measurement correctness and acquisition safety** over cosmetic changes.
-

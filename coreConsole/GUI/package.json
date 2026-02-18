@@ -13,7 +13,7 @@
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "vite --config renderer/vite.config.ts",
     "dev:electron": "wait-on tcp:5173 && electron .",
-    "backend": "python backend/coredaq_service.py",
+    "backend": "node backend/coredaq_service.js",
     "build": "npm run build:renderer",
     "build:renderer": "vite build --config renderer/vite.config.ts",
     "preview": "vite preview --config renderer/vite.config.ts",
@@ -29,7 +29,9 @@
   "dependencies": {
     "echarts": "^5.6.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "serialport": "^12.0.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
@@ -54,13 +56,21 @@
     },
     "files": [
       "electron/**/*",
+      "backend/coredaq_service.js",
       "renderer/dist/**/*",
       "package.json"
     ],
     "extraResources": [
       {
-        "from": "backend/bin",
-        "to": "backend",
+        "from": "../API",
+        "to": "API",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../packages/laser-js",
+        "to": "laser-js",
         "filter": [
           "**/*"
         ]

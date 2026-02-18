@@ -32,7 +32,7 @@ Repositories:
 Important CoreDAQ software components:
 
 - API: `API/coredaq_python_api.py`
-- GUI backend service: `GUI/backend/coredaq_service.py`
+- GUI backend service: `GUI/backend/coredaq_service.js`
 - Electron app shell: `GUI/electron/main.js`
 - React frontend tabs in `GUI/renderer/src/`
 
