@@ -1,0 +1,17 @@
+{
+  "name": "@coredaq/visa-service",
+  "version": "0.1.0",
+  "private": true,
+  "description": "JSON-RPC VISA service for Electron main process",
+  "type": "commonjs",
+  "main": "src/service.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/service.js",
+    "start:mock": "VISA_SERVICE_MOCK=1 node src/service.js",
+    "demo": "node src/demo_cli.js",
+    "check": "node --check src/service.js && node --check src/demo_cli.js"
+  }
+}

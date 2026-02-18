@@ -1,6 +1,7 @@
 # coreConsole Windows 10 Build Guide
 
 This guide builds `coreConsole` (Electron GUI + Python backend) into a Windows executable package.
+It also includes the optional NI-VISA GPIB stack (`visa-addon` + `visa-service`).
 
 ## 1) Prerequisites
 
@@ -49,6 +50,8 @@ From repo root:
 ```bat
 npm install
 npm --prefix GUI install
+npm --prefix packages\visa-addon install
+npm --prefix packages\visa-service install
 ```
 
 ## 6) Build Python backend EXE
@@ -80,7 +83,36 @@ npm run dist:win
 npm run dist:win:portable
 ```
 
-## 8) Output locations
+## 8) Build NI-VISA native addon (for GPIB support)
+
+> Required only if you need GPIB from Electron.
+
+Install prerequisites:
+- NI-VISA x64 (runtime)
+- Visual Studio Build Tools (C++ workload)
+
+Build:
+
+```bat
+cd packages\visa-addon
+npm run build
+cd ..\..
+```
+
+Verify addon binary:
+
+```bat
+dir packages\visa-addon\build\Release\visa_addon.node
+```
+
+Quick service smoke test (mock, no hardware):
+
+```bat
+set VISA_SERVICE_MOCK=1
+npm --prefix packages\visa-service start
+```
+
+## 9) Output locations
 
 - Installer/zip/portable outputs:
   - `GUI\release\`
@@ -89,13 +121,13 @@ npm run dist:win:portable
   - `GUI\release\*.zip`
   - `GUI\release\win-unpacked\coreConsole.exe`
 
-## 9) Quick validation
+## 10) Quick validation
 
 1. Run the packaged app EXE.
 2. Confirm window renders UI (not blank).
 3. Connect coreDAQ and verify status updates.
 
-## 10) If packaged app opens a dark/blank window
+## 11) If packaged app opens a dark/blank window
 
 Use latest repo state and rebuild. Renderer assets must be relative for packaged `file://` loading.
 
@@ -107,10 +139,31 @@ rmdir /S /Q GUI\release
 npm run dist:win:portable
 ```
 
-## 11) Optional: run app in dev mode (no packaging)
+## 12) Optional: run app in dev mode (no packaging)
 
 ```bat
 set COREDAQ_PYTHON=C:\Users\<you>\miniconda3\envs\coreDAQ\python.exe
 npm run dev
 ```
 
+## 13) NI-VISA / GPIB runtime checks
+
+At app startup, Electron main spawns `visa-service` and requests health.
+
+- If NI-VISA is missing, you should see a modal with:
+  - error code (for example `NI_VISA_NOT_FOUND`)
+  - checked VISA DLL paths
+  - install guidance
+- If NI-VISA is present but no GPIB resources are detected, health returns:
+  - `visaLoaded: true`
+  - `resourceManager: true`
+  - `gpibDetected: false`
+
+You can force service behavior:
+
+```bat
+set COREDAQ_ENABLE_GPIB_SERVICE=1
+set COREDAQ_DISABLE_GPIB_SERVICE=0
+set VISA_ADDON_PATH=C:\path\to\visa_addon.node
+set VISA_SERVICE_LOG=C:\temp\coreconsole_visa_service.log
+```

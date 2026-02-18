@@ -1,0 +1,12 @@
+{
+  "name": "@coredaq/electron-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Wrapper package for coreConsole Electron app",
+  "scripts": {
+    "dev": "npm --prefix ../../GUI run dev",
+    "build": "npm --prefix ../../GUI run build",
+    "dist:win": "npm --prefix ../../GUI run dist:win",
+    "dist:win:portable": "npm --prefix ../../GUI run dist:win:portable"
+  }
+}

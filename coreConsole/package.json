@@ -13,6 +13,10 @@
     "dist:mac": "npm --prefix GUI run dist:mac",
     "dist:win": "npm --prefix GUI run dist:win",
     "dist:win:portable": "npm --prefix GUI run dist:win:portable",
-    "release:organize": "npm --prefix GUI run release:organize"
+    "release:organize": "npm --prefix GUI run release:organize",
+    "visa:addon:install": "npm --prefix packages/visa-addon install",
+    "visa:addon:build": "npm --prefix packages/visa-addon run build",
+    "visa:service:check": "npm --prefix packages/visa-service run check",
+    "visa:service:demo": "npm --prefix packages/visa-service run demo"
   }
 }

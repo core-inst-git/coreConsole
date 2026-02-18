@@ -46,6 +46,9 @@
     "appId": "com.coreinstrumentation.coreconsole",
     "productName": "coreConsole",
     "asar": true,
+    "asarUnpack": [
+      "**/*.node"
+    ],
     "directories": {
       "output": "release"
     },
@@ -60,6 +63,20 @@
         "to": "backend",
         "filter": [
           "**/*"
+        ]
+      },
+      {
+        "from": "../packages/visa-service",
+        "to": "visa-service",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../packages/visa-addon/build/Release",
+        "to": "visa-addon/build/Release",
+        "filter": [
+          "*.node"
         ]
       }
     ],

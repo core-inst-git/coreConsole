@@ -3,12 +3,14 @@ const path = require('path');
 const fs = require('fs');
 const { Menu } = require('electron');
 const { spawn } = require('child_process');
+const { VisaServiceClient, isWin } = require('./visaServiceClient');
 
 const isDev = !app.isPackaged;
 const devURL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
 
 let mainWindow;
 let backendProc;
+let visaClient;
 
 function emitWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -243,10 +245,64 @@ function startBackend() {
   });
 }
 
+function shouldEnableVisaService() {
+  if (process.env.COREDAQ_DISABLE_GPIB_SERVICE === '1') return false;
+  if (process.env.COREDAQ_ENABLE_GPIB_SERVICE === '1') return true;
+  return isWin();
+}
+
+function showVisaBootErrorDialog(err) {
+  const code = String(err?.code || 'VISA_BOOT_ERROR');
+  const message = String(err?.message || 'Failed to start VISA service');
+  const checked = Array.isArray(err?.checkedPaths) ? err.checkedPaths : [];
+  const fix = String(
+    err?.fix ||
+    (code === 'NI_VISA_NOT_FOUND'
+      ? 'Install NI-VISA (and NI-488.2 for GPIB), then restart the app.'
+      : 'Check NI-VISA installation and addon packaging, then retry.')
+  );
+  const detail = [
+    `Code: ${code}`,
+    `Message: ${message}`,
+    checked.length ? `Checked paths:\n${checked.join('\n')}` : '',
+    `Fix: ${fix}`,
+  ].filter(Boolean).join('\n\n');
+
+  dialog.showMessageBox({
+    type: code === 'NI_VISA_NOT_FOUND' ? 'error' : 'warning',
+    buttons: ['OK'],
+    title: 'GPIB Driver Setup',
+    message: 'VISA/GPIB service is unavailable.',
+    detail,
+  }).catch(() => {});
+}
+
+async function startVisaService() {
+  if (!shouldEnableVisaService()) return;
+  if (visaClient) return;
+
+  visaClient = new VisaServiceClient({
+    isDev,
+    autoRestart: true,
+    onBootError: showVisaBootErrorDialog,
+    onBootOk: (_health) => {
+      // no-op; consumers call gpib:health on demand
+    },
+  });
+
+  try {
+    await visaClient.start();
+  } catch (err) {
+    console.warn('[coreConsole] VISA service failed to start:', err);
+    showVisaBootErrorDialog(err);
+  }
+}
+
 app.whenReady().then(() => {
   createWindow();
   buildMenu();
   startBackend();
+  startVisaService();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -260,6 +316,9 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   if (backendProc) {
     backendProc.kill();
+  }
+  if (visaClient) {
+    visaClient.stop().catch(() => {});
   }
 });
 
@@ -308,4 +367,85 @@ ipcMain.handle('coredaq:pick-save-path', async (_event, opts) => {
     canceled: !!out.canceled,
     filePath: out.filePath || null,
   };
+});
+
+ipcMain.handle('gpib:health', async () => {
+  if (!shouldEnableVisaService()) {
+    return {
+      enabled: false,
+      reason: 'GPIB service disabled on this platform/config',
+    };
+  }
+  await startVisaService();
+  const health = await visaClient.health();
+  return {
+    enabled: true,
+    ...health,
+  };
+});
+
+ipcMain.handle('gpib:list', async () => {
+  await startVisaService();
+  if (!visaClient) throw new Error('GPIB service unavailable');
+  const resources = await visaClient.request('listResources', {});
+  return Array.isArray(resources) ? resources : [];
+});
+
+ipcMain.handle('gpib:open', async (_event, payload) => {
+  await startVisaService();
+  if (!visaClient) throw new Error('GPIB service unavailable');
+  const resource = String(payload?.resource || '').trim();
+  return visaClient.request('open', { resource, timeoutMs: payload?.timeoutMs });
+});
+
+ipcMain.handle('gpib:write', async (_event, payload) => {
+  await startVisaService();
+  if (!visaClient) throw new Error('GPIB service unavailable');
+  return visaClient.request('write', {
+    sessionId: payload?.sessionId,
+    command: payload?.command,
+  });
+});
+
+ipcMain.handle('gpib:read', async (_event, payload) => {
+  await startVisaService();
+  if (!visaClient) throw new Error('GPIB service unavailable');
+  return visaClient.request('read', {
+    sessionId: payload?.sessionId,
+    maxBytes: payload?.maxBytes,
+  });
+});
+
+ipcMain.handle('gpib:query', async (_event, payload) => {
+  await startVisaService();
+  if (!visaClient) throw new Error('GPIB service unavailable');
+  return visaClient.request('query', {
+    sessionId: payload?.sessionId,
+    resource: payload?.resource,
+    command: payload?.command,
+    maxBytes: payload?.maxBytes,
+    timeoutMs: payload?.timeoutMs,
+  });
+});
+
+ipcMain.handle('gpib:set-timeout', async (_event, payload) => {
+  await startVisaService();
+  if (!visaClient) throw new Error('GPIB service unavailable');
+  return visaClient.request('setTimeout', {
+    sessionId: payload?.sessionId,
+    ms: payload?.ms,
+  });
+});
+
+ipcMain.handle('gpib:close', async (_event, payload) => {
+  await startVisaService();
+  if (!visaClient) throw new Error('GPIB service unavailable');
+  return visaClient.request('close', { sessionId: payload?.sessionId });
+});
+
+ipcMain.handle('gpib:restart-service', async () => {
+  await startVisaService();
+  if (!visaClient) throw new Error('GPIB service unavailable');
+  await visaClient.restart();
+  return { ok: true };
 });
