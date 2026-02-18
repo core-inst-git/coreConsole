@@ -25,6 +25,12 @@ npm --prefix packages/visa-addon run build
 npm run dev
 ```
 
+One-shot bootstrap after fresh clone:
+```bash
+cd coreConsole
+./bootstrap.sh
+```
+
 ## NI-VISA smoke tests
 ```bash
 cd coreConsole
