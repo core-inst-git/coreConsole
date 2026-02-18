@@ -1,0 +1,18 @@
+{
+  "name": "coredaq-js-api",
+  "version": "0.1.0",
+  "description": "Node.js API for coreDAQ devices",
+  "private": true,
+  "main": "coredaq_js_api.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "check": "node --check coredaq_js_api.js",
+    "example:discover": "node examples_js/example_discover_snapshot.js"
+  },
+  "dependencies": {
+    "serialport": "^12.0.0"
+  }
+}
