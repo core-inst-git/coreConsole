@@ -10,14 +10,12 @@ Key points:
 - Laser sweep commands for TSL550/TSL570/TSL770 are in `packages/laser-js`.
 - Sweep control uses JS VISA path (no `pyvisa` in default mode).
 
-## Optional standalone VISA service path
+## Electron-main VISA service path
 
 Renderer -> Electron IPC -> Main -> `visa-service` (stdio JSON-RPC) -> `visa-addon` -> NI-VISA
 
-This path is kept for standalone diagnostics/smoke testing (`packages/visa-service/examples/*`) and can be re-enabled with env flags:
-
-- `COREDAQ_ENABLE_GPIB_SERVICE=1`
-- `COREDAQ_DISABLE_GPIB_SERVICE=0`
+This runs by default inside the Electron app.  
+Use `COREDAQ_DISABLE_GPIB_SERVICE=1` only if you explicitly want to bypass it for debugging.
 
 ## Package layout
 

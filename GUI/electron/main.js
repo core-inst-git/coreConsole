@@ -255,8 +255,7 @@ function startBackend() {
 
 function shouldEnableVisaService() {
   if (process.env.COREDAQ_DISABLE_GPIB_SERVICE === '1') return false;
-  if (process.env.COREDAQ_ENABLE_GPIB_SERVICE === '1') return true;
-  return false;
+  return true;
 }
 
 function showVisaBootErrorDialog(err) {

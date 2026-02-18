@@ -21,6 +21,7 @@ class VisaServiceClient {
     this.onBootError = typeof opts.onBootError === 'function' ? opts.onBootError : null;
     this.onBootOk = typeof opts.onBootOk === 'function' ? opts.onBootOk : null;
     this.restartDelayMs = Number.isFinite(Number(opts.restartDelayMs)) ? Number(opts.restartDelayMs) : 1000;
+    this.bootTimeoutMs = Number.isFinite(Number(opts.bootTimeoutMs)) ? Number(opts.bootTimeoutMs) : 10000;
     this.autoRestart = opts.autoRestart !== false;
 
     this.child = null;
@@ -178,7 +179,7 @@ class VisaServiceClient {
         this._scheduleRestart();
       });
 
-      // Boot handshake timeout.
+      // Boot handshake timeout (Windows can take a few seconds to load VISA stack).
       setTimeout(() => {
         this.starting = null;
         if (this.lastBootError) {
@@ -190,7 +191,7 @@ class VisaServiceClient {
           return;
         }
         resolve();
-      }, 2000);
+      }, this.bootTimeoutMs);
     });
 
     return this.starting;
