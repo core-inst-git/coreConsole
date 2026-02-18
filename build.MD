@@ -167,3 +167,18 @@ set COREDAQ_DISABLE_GPIB_SERVICE=0
 set VISA_ADDON_PATH=C:\path\to\visa_addon.node
 set VISA_SERVICE_LOG=C:\temp\coreconsole_visa_service.log
 ```
+
+Standalone smoke tests (before launching Electron):
+
+```bat
+cd C:\path\to\coreDev\coreConsole
+node packages\visa-service\examples\visa_smoke.js --list-only
+node packages\visa-service\examples\visa_smoke.js --resource GPIB0::10::INSTR --command "*IDN?"
+```
+
+Windows helper wrapper:
+
+```bat
+powershell -ExecutionPolicy Bypass -File packages\visa-service\examples\run_windows.ps1 -ListOnly
+powershell -ExecutionPolicy Bypass -File packages\visa-service\examples\run_windows.ps1 -Resource "GPIB0::10::INSTR" -Command "*IDN?"
+```

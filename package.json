@@ -17,6 +17,8 @@
     "visa:addon:install": "npm --prefix packages/visa-addon install",
     "visa:addon:build": "npm --prefix packages/visa-addon run build",
     "visa:service:check": "npm --prefix packages/visa-service run check",
-    "visa:service:demo": "npm --prefix packages/visa-service run demo"
+    "visa:service:demo": "npm --prefix packages/visa-service run demo",
+    "visa:smoke": "npm --prefix packages/visa-service run smoke",
+    "visa:smoke:mock": "npm --prefix packages/visa-service run smoke:mock"
   }
 }

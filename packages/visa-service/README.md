@@ -44,3 +44,29 @@ Mock mode:
 ```bash
 VISA_SERVICE_MOCK=1 npm start
 ```
+
+## Smoke test scripts (Windows + macOS)
+
+Cross-platform Node script:
+
+```bash
+cd coreConsole
+node packages/visa-service/examples/visa_smoke.js --list-only
+node packages/visa-service/examples/visa_smoke.js --resource GPIB0::10::INSTR --command \"*IDN?\"
+```
+
+Windows PowerShell wrapper:
+
+```powershell
+cd coreConsole
+powershell -ExecutionPolicy Bypass -File packages/visa-service/examples/run_windows.ps1 -ListOnly
+powershell -ExecutionPolicy Bypass -File packages/visa-service/examples/run_windows.ps1 -Resource \"GPIB0::10::INSTR\" -Command \"*IDN?\"
+```
+
+macOS wrapper:
+
+```bash
+cd coreConsole
+./packages/visa-service/examples/run_macos.sh --list-only
+./packages/visa-service/examples/run_macos.sh --resource GPIB0::10::INSTR --command \"*IDN?\"
+```

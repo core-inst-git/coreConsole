@@ -67,3 +67,11 @@ Preload exposes these as `window.gpib.*`.
 3) resource enumeration and `gpibDetected` status
 
 If NI-VISA is missing, boot returns `BOOT_ERROR` with `checkedPaths` and install guidance.
+
+## Standalone smoke tests
+
+Use these before wiring full UI workflows:
+
+- `packages/visa-service/examples/visa_smoke.js` (cross-platform Node RPC client)
+- `packages/visa-service/examples/run_windows.ps1`
+- `packages/visa-service/examples/run_macos.sh`
