@@ -12,6 +12,8 @@
     "start": "node src/service.js",
     "start:mock": "VISA_SERVICE_MOCK=1 node src/service.js",
     "demo": "node src/demo_cli.js",
-    "check": "node --check src/service.js && node --check src/demo_cli.js"
+    "check": "node --check src/service.js && node --check src/demo_cli.js && node --check examples/visa_smoke.js",
+    "smoke": "node examples/visa_smoke.js --list-only",
+    "smoke:mock": "VISA_SERVICE_MOCK=1 node examples/visa_smoke.js --mock"
   }
 }

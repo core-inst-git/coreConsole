@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <dlfcn.h>
 #endif
 
 namespace {
@@ -41,8 +44,52 @@ constexpr ViAttr VI_ATTR_TERMCHAR_EN = 0x3FFF0038U;
 constexpr size_t VISA_DESC_BUF_LEN = 1024;
 constexpr ViUInt32 READ_MAX_BYTES_LIMIT = 1024U * 1024U;
 
+#ifdef _WIN32
+#define VISA_CALL __stdcall
+using VisaLibHandle = HMODULE;
+#else
+#define VISA_CALL
+using VisaLibHandle = void*;
+#endif
+
+using viOpenDefaultRM_t = ViStatus(VISA_CALL*)(ViSession*);
+using viFindRsrc_t = ViStatus(VISA_CALL*)(ViSession, ViString, ViFindList*, ViUInt32*, char[]);
+using viFindNext_t = ViStatus(VISA_CALL*)(ViFindList, char[]);
+using viOpen_t = ViStatus(VISA_CALL*)(ViSession, ViRsrc, ViAccessMode, ViUInt32, ViSession*);
+using viSetAttribute_t = ViStatus(VISA_CALL*)(ViObject, ViAttr, ViAttrState);
+using viWrite_t = ViStatus(VISA_CALL*)(ViSession, ViBuf, ViUInt32, ViUInt32*);
+using viRead_t = ViStatus(VISA_CALL*)(ViSession, ViBuf, ViUInt32, ViUInt32*);
+using viClose_t = ViStatus(VISA_CALL*)(ViObject);
+using viStatusDesc_t = ViStatus(VISA_CALL*)(ViObject, ViStatus, char[]);
+
+VisaLibHandle g_visa = nullptr;
+std::string g_loaded_path;
+std::vector<std::string> g_checked_paths;
+
+viOpenDefaultRM_t p_viOpenDefaultRM = nullptr;
+viFindRsrc_t p_viFindRsrc = nullptr;
+viFindNext_t p_viFindNext = nullptr;
+viOpen_t p_viOpen = nullptr;
+viSetAttribute_t p_viSetAttribute = nullptr;
+viWrite_t p_viWrite = nullptr;
+viRead_t p_viRead = nullptr;
+viClose_t p_viClose = nullptr;
+viStatusDesc_t p_viStatusDesc = nullptr;
+
 bool IsVisaSuccess(ViStatus st) {
   return st >= 0;
+}
+
+const char* PlatformName() {
+#ifdef _WIN32
+  return "win32";
+#elif __APPLE__
+  return "darwin";
+#elif __linux__
+  return "linux";
+#else
+  return "unknown";
+#endif
 }
 
 std::string HexStatus(ViStatus st) {
@@ -71,31 +118,6 @@ std::string VisaStatusName(ViStatus st) {
 }
 
 #ifdef _WIN32
-
-using viOpenDefaultRM_t = ViStatus(__stdcall*)(ViSession*);
-using viFindRsrc_t = ViStatus(__stdcall*)(ViSession, ViString, ViFindList*, ViUInt32*, char[]);
-using viFindNext_t = ViStatus(__stdcall*)(ViFindList, char[]);
-using viOpen_t = ViStatus(__stdcall*)(ViSession, ViRsrc, ViAccessMode, ViUInt32, ViSession*);
-using viSetAttribute_t = ViStatus(__stdcall*)(ViObject, ViAttr, ViAttrState);
-using viWrite_t = ViStatus(__stdcall*)(ViSession, ViBuf, ViUInt32, ViUInt32*);
-using viRead_t = ViStatus(__stdcall*)(ViSession, ViBuf, ViUInt32, ViUInt32*);
-using viClose_t = ViStatus(__stdcall*)(ViObject);
-using viStatusDesc_t = ViStatus(__stdcall*)(ViObject, ViStatus, char[]);
-
-HMODULE g_visa = nullptr;
-std::string g_loaded_path;
-std::vector<std::string> g_checked_paths;
-
-viOpenDefaultRM_t p_viOpenDefaultRM = nullptr;
-viFindRsrc_t p_viFindRsrc = nullptr;
-viFindNext_t p_viFindNext = nullptr;
-viOpen_t p_viOpen = nullptr;
-viSetAttribute_t p_viSetAttribute = nullptr;
-viWrite_t p_viWrite = nullptr;
-viRead_t p_viRead = nullptr;
-viClose_t p_viClose = nullptr;
-viStatusDesc_t p_viStatusDesc = nullptr;
-
 std::string WideToUtf8(const std::wstring& ws) {
   if (ws.empty()) return std::string();
   int sz = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, nullptr, 0, nullptr, nullptr);
@@ -104,6 +126,16 @@ std::string WideToUtf8(const std::wstring& ws) {
   WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, out.data(), sz, nullptr, nullptr);
   return out;
 }
+
+std::wstring Utf8ToWide(const std::string& s) {
+  if (s.empty()) return std::wstring();
+  int wlen = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+  if (wlen <= 1) return std::wstring();
+  std::wstring ws(static_cast<size_t>(wlen - 1), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, ws.data(), wlen);
+  return ws;
+}
+#endif
 
 void ResetVisaPointers() {
   p_viOpenDefaultRM = nullptr;
@@ -117,16 +149,36 @@ void ResetVisaPointers() {
   p_viStatusDesc = nullptr;
 }
 
+void CloseVisaLibrary() {
+  if (!g_visa) return;
+#ifdef _WIN32
+  FreeLibrary(g_visa);
+#else
+  dlclose(g_visa);
+#endif
+  g_visa = nullptr;
+  g_loaded_path.clear();
+  ResetVisaPointers();
+}
+
+void* ResolveSymbol(const char* name) {
+#ifdef _WIN32
+  return reinterpret_cast<void*>(GetProcAddress(g_visa, name));
+#else
+  return dlsym(g_visa, name);
+#endif
+}
+
 bool ResolveVisaSymbols(std::string* reason) {
-  p_viOpenDefaultRM = reinterpret_cast<viOpenDefaultRM_t>(GetProcAddress(g_visa, "viOpenDefaultRM"));
-  p_viFindRsrc = reinterpret_cast<viFindRsrc_t>(GetProcAddress(g_visa, "viFindRsrc"));
-  p_viFindNext = reinterpret_cast<viFindNext_t>(GetProcAddress(g_visa, "viFindNext"));
-  p_viOpen = reinterpret_cast<viOpen_t>(GetProcAddress(g_visa, "viOpen"));
-  p_viSetAttribute = reinterpret_cast<viSetAttribute_t>(GetProcAddress(g_visa, "viSetAttribute"));
-  p_viWrite = reinterpret_cast<viWrite_t>(GetProcAddress(g_visa, "viWrite"));
-  p_viRead = reinterpret_cast<viRead_t>(GetProcAddress(g_visa, "viRead"));
-  p_viClose = reinterpret_cast<viClose_t>(GetProcAddress(g_visa, "viClose"));
-  p_viStatusDesc = reinterpret_cast<viStatusDesc_t>(GetProcAddress(g_visa, "viStatusDesc"));
+  p_viOpenDefaultRM = reinterpret_cast<viOpenDefaultRM_t>(ResolveSymbol("viOpenDefaultRM"));
+  p_viFindRsrc = reinterpret_cast<viFindRsrc_t>(ResolveSymbol("viFindRsrc"));
+  p_viFindNext = reinterpret_cast<viFindNext_t>(ResolveSymbol("viFindNext"));
+  p_viOpen = reinterpret_cast<viOpen_t>(ResolveSymbol("viOpen"));
+  p_viSetAttribute = reinterpret_cast<viSetAttribute_t>(ResolveSymbol("viSetAttribute"));
+  p_viWrite = reinterpret_cast<viWrite_t>(ResolveSymbol("viWrite"));
+  p_viRead = reinterpret_cast<viRead_t>(ResolveSymbol("viRead"));
+  p_viClose = reinterpret_cast<viClose_t>(ResolveSymbol("viClose"));
+  p_viStatusDesc = reinterpret_cast<viStatusDesc_t>(ResolveSymbol("viStatusDesc"));
 
   if (!p_viOpenDefaultRM || !p_viFindRsrc || !p_viFindNext || !p_viOpen ||
       !p_viSetAttribute || !p_viWrite || !p_viRead || !p_viClose || !p_viStatusDesc) {
@@ -139,53 +191,102 @@ bool ResolveVisaSymbols(std::string* reason) {
   return true;
 }
 
+std::vector<std::string> BuildVisaCandidates() {
+  std::vector<std::string> c;
+#ifdef _WIN32
+  c = {
+      "visa64.dll",
+      "C:\\Windows\\System32\\visa64.dll",
+      "C:\\Program Files\\IVI Foundation\\VISA\\Win64\\Bin\\visa64.dll",
+      "C:\\Program Files\\National Instruments\\Shared\\VISA\\Bin\\visa64.dll",
+  };
+#elif __APPLE__
+  c = {
+      "libvisa.dylib",
+      "/Library/Frameworks/VISA.framework/VISA",
+      "/usr/local/vxipnp/mac/lib/libvisa.dylib",
+      "/usr/local/lib/libvisa.dylib",
+      "/opt/homebrew/lib/libvisa.dylib",
+  };
+#else
+  c = {
+      "libvisa.so",
+      "/usr/lib/libvisa.so",
+      "/usr/local/lib/libvisa.so",
+  };
+#endif
+
+  const char* env_path = std::getenv("VISA_DLL_PATH");
+  if (env_path != nullptr && env_path[0] != '\0') {
+    c.insert(c.begin(), std::string(env_path));
+  }
+  return c;
+}
+
+bool TryLoadLibrary(const std::string& p, VisaLibHandle* out) {
+#ifdef _WIN32
+  const std::wstring wp = Utf8ToWide(p);
+  if (wp.empty()) return false;
+  HMODULE lib = LoadLibraryW(wp.c_str());
+  if (!lib) return false;
+  *out = lib;
+  return true;
+#else
+  void* lib = dlopen(p.c_str(), RTLD_NOW | RTLD_LOCAL);
+  if (!lib) return false;
+  *out = lib;
+  return true;
+#endif
+}
+
 bool LoadVisaLibrary(std::string* reason) {
   if (g_visa != nullptr) {
     return true;
   }
 
   g_checked_paths.clear();
-
-  std::vector<std::wstring> candidates = {
-      L"visa64.dll",
-      L"C:\\Windows\\System32\\visa64.dll",
-      L"C:\\Program Files\\IVI Foundation\\VISA\\Win64\\Bin\\visa64.dll",
-      L"C:\\Program Files\\National Instruments\\Shared\\VISA\\Bin\\visa64.dll",
-  };
-
-  const char* env_path = std::getenv("VISA_DLL_PATH");
-  if (env_path != nullptr && env_path[0] != '\0') {
-    std::wstring wenv;
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, env_path, -1, nullptr, 0);
-    if (wlen > 1) {
-      wenv.resize(static_cast<size_t>(wlen - 1));
-      MultiByteToWideChar(CP_UTF8, 0, env_path, -1, &wenv[0], wlen);
-      candidates.insert(candidates.begin(), wenv);
-    }
-  }
+  const auto candidates = BuildVisaCandidates();
 
   for (const auto& c : candidates) {
-    g_checked_paths.push_back(WideToUtf8(c));
-    HMODULE lib = LoadLibraryW(c.c_str());
-    if (lib == nullptr) {
+    g_checked_paths.push_back(c);
+    VisaLibHandle lib = nullptr;
+    if (!TryLoadLibrary(c, &lib)) {
       continue;
     }
 
     g_visa = lib;
-    g_loaded_path = WideToUtf8(c);
+    g_loaded_path = c;
 
     if (ResolveVisaSymbols(reason)) {
       return true;
     }
 
-    FreeLibrary(g_visa);
-    g_visa = nullptr;
-    g_loaded_path.clear();
+    CloseVisaLibrary();
   }
 
   if (reason) {
+#ifdef _WIN32
     *reason = "Could not load NI-VISA library (visa64.dll)";
+#else
+    *reason = "Could not load VISA library (libvisa)";
+#endif
   }
+  return false;
+}
+
+bool EnsureVisaLoaded(Napi::Env env) {
+  std::string reason;
+  if (LoadVisaLibrary(&reason)) return true;
+
+  Napi::Error err = Napi::Error::New(env, reason);
+  Napi::Object obj = err.Value();
+  obj.Set("code", Napi::String::New(env, "NI_VISA_NOT_FOUND"));
+  Napi::Array arr = Napi::Array::New(env, g_checked_paths.size());
+  for (size_t i = 0; i < g_checked_paths.size(); ++i) {
+    arr.Set(i, Napi::String::New(env, g_checked_paths[i]));
+  }
+  obj.Set("checkedPaths", arr);
+  err.ThrowAsJavaScriptException();
   return false;
 }
 
@@ -201,31 +302,6 @@ std::string StatusDescription(ViObject handle, ViStatus st) {
   std::ostringstream oss;
   oss << VisaStatusName(st) << " (" << HexStatus(st) << ")";
   return oss.str();
-}
-
-#else
-
-std::vector<std::string> g_checked_paths;
-
-#endif
-
-Napi::Object BuildErrorObject(Napi::Env env,
-                              const std::string& code,
-                              const std::string& message,
-                              ViStatus st,
-                              bool include_paths = false) {
-  Napi::Object e = Napi::Object::New(env);
-  e.Set("code", Napi::String::New(env, code));
-  e.Set("message", Napi::String::New(env, message));
-  e.Set("status", Napi::Number::New(env, static_cast<double>(st)));
-  if (include_paths) {
-    Napi::Array arr = Napi::Array::New(env, g_checked_paths.size());
-    for (size_t i = 0; i < g_checked_paths.size(); ++i) {
-      arr.Set(i, Napi::String::New(env, g_checked_paths[i]));
-    }
-    e.Set("checkedPaths", arr);
-  }
-  return e;
 }
 
 void ThrowVisaJsError(Napi::Env env,
@@ -251,11 +327,11 @@ Napi::Value Health(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
   Napi::Object out = Napi::Object::New(env);
 
-#ifdef _WIN32
   std::string reason;
   const bool loaded = LoadVisaLibrary(&reason);
+
   out.Set("visaLoaded", Napi::Boolean::New(env, loaded));
-  out.Set("platform", Napi::String::New(env, "win32"));
+  out.Set("platform", Napi::String::New(env, PlatformName()));
   out.Set("reason", Napi::String::New(env, reason));
   out.Set("loadedPath", Napi::String::New(env, g_loaded_path));
 
@@ -284,22 +360,11 @@ Napi::Value Health(const Napi::CallbackInfo& info) {
     (void)p_viClose(rm);
   }
   return out;
-#else
-  out.Set("visaLoaded", Napi::Boolean::New(env, false));
-  out.Set("platform", Napi::String::New(env, "non-win32"));
-  out.Set("reason", Napi::String::New(env, "NI-VISA addon currently supports Windows only"));
-  out.Set("resourceManager", Napi::Boolean::New(env, false));
-  return out;
-#endif
 }
 
 Napi::Value InitVisa(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
-
-#ifdef _WIN32
-  std::string reason;
-  if (!LoadVisaLibrary(&reason)) {
-    ThrowVisaJsError(env, "NI_VISA_NOT_FOUND", reason, 0, true);
+  if (!EnsureVisaLoaded(env)) {
     return env.Null();
   }
 
@@ -311,20 +376,14 @@ Napi::Value InitVisa(const Napi::CallbackInfo& info) {
   }
 
   return Napi::Number::New(env, static_cast<double>(rm));
-#else
-  ThrowVisaJsError(env,
-                   "UNSUPPORTED_PLATFORM",
-                   "NI-VISA addon currently supports Windows only",
-                   0,
-                   false);
-  return env.Null();
-#endif
 }
 
 Napi::Value ListResources(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
+  if (!EnsureVisaLoaded(env)) {
+    return env.Null();
+  }
 
-#ifdef _WIN32
   if (info.Length() < 1 || !info[0].IsNumber()) {
     ThrowVisaJsError(env, "INVALID_ARGUMENT", "listResources(rmHandle) requires rmHandle number", 0);
     return env.Null();
@@ -366,15 +425,14 @@ Napi::Value ListResources(const Napi::CallbackInfo& info) {
   }
 
   return out;
-#else
-  return Napi::Array::New(env, 0);
-#endif
 }
 
 Napi::Value OpenSession(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
+  if (!EnsureVisaLoaded(env)) {
+    return env.Null();
+  }
 
-#ifdef _WIN32
   if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsString()) {
     ThrowVisaJsError(env,
                      "INVALID_ARGUMENT",
@@ -394,20 +452,14 @@ Napi::Value OpenSession(const Napi::CallbackInfo& info) {
   }
 
   return Napi::Number::New(env, static_cast<double>(session));
-#else
-  ThrowVisaJsError(env,
-                   "UNSUPPORTED_PLATFORM",
-                   "NI-VISA addon currently supports Windows only",
-                   0,
-                   false);
-  return env.Null();
-#endif
 }
 
 Napi::Value SetTimeout(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
+  if (!EnsureVisaLoaded(env)) {
+    return env.Null();
+  }
 
-#ifdef _WIN32
   if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber()) {
     ThrowVisaJsError(env,
                      "INVALID_ARGUMENT",
@@ -424,15 +476,14 @@ Napi::Value SetTimeout(const Napi::CallbackInfo& info) {
     return env.Null();
   }
   return env.Undefined();
-#else
-  return env.Undefined();
-#endif
 }
 
 Napi::Value SetTermChar(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
+  if (!EnsureVisaLoaded(env)) {
+    return env.Null();
+  }
 
-#ifdef _WIN32
   if (info.Length() < 3 || !info[0].IsNumber() || !info[1].IsNumber() || !info[2].IsBoolean()) {
     ThrowVisaJsError(env,
                      "INVALID_ARGUMENT",
@@ -458,15 +509,14 @@ Napi::Value SetTermChar(const Napi::CallbackInfo& info) {
   }
 
   return env.Undefined();
-#else
-  return env.Undefined();
-#endif
 }
 
 Napi::Value Write(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
+  if (!EnsureVisaLoaded(env)) {
+    return env.Null();
+  }
 
-#ifdef _WIN32
   if (info.Length() < 2 || !info[0].IsNumber() || !(info[1].IsBuffer() || info[1].IsString())) {
     ThrowVisaJsError(env,
                      "INVALID_ARGUMENT",
@@ -503,20 +553,14 @@ Napi::Value Write(const Napi::CallbackInfo& info) {
   }
 
   return Napi::Number::New(env, static_cast<double>(written));
-#else
-  ThrowVisaJsError(env,
-                   "UNSUPPORTED_PLATFORM",
-                   "NI-VISA addon currently supports Windows only",
-                   0,
-                   false);
-  return env.Null();
-#endif
 }
 
 Napi::Value Read(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
+  if (!EnsureVisaLoaded(env)) {
+    return env.Null();
+  }
 
-#ifdef _WIN32
   if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber()) {
     ThrowVisaJsError(env, "INVALID_ARGUMENT", "read(sessionHandle, maxBytes) requires (number, number)", 0);
     return env.Null();
@@ -538,20 +582,14 @@ Napi::Value Read(const Napi::CallbackInfo& info) {
   }
 
   return Napi::Buffer<uint8_t>::Copy(env, buf.data(), static_cast<size_t>(read_count));
-#else
-  ThrowVisaJsError(env,
-                   "UNSUPPORTED_PLATFORM",
-                   "NI-VISA addon currently supports Windows only",
-                   0,
-                   false);
-  return env.Null();
-#endif
 }
 
 Napi::Value Close(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
+  if (!EnsureVisaLoaded(env)) {
+    return env.Null();
+  }
 
-#ifdef _WIN32
   if (info.Length() < 1 || !info[0].IsNumber()) {
     ThrowVisaJsError(env, "INVALID_ARGUMENT", "close(handle) requires number", 0);
     return env.Null();
@@ -565,15 +603,14 @@ Napi::Value Close(const Napi::CallbackInfo& info) {
   }
 
   return env.Undefined();
-#else
-  return env.Undefined();
-#endif
 }
 
 Napi::Value StatusDesc(const Napi::CallbackInfo& info) {
   Napi::Env env = info.Env();
+  if (!EnsureVisaLoaded(env)) {
+    return env.Null();
+  }
 
-#ifdef _WIN32
   if (info.Length() < 2 || !info[0].IsNumber() || !info[1].IsNumber()) {
     ThrowVisaJsError(env, "INVALID_ARGUMENT", "statusDesc(handle, status) requires (number, number)", 0);
     return env.Null();
@@ -581,9 +618,6 @@ Napi::Value StatusDesc(const Napi::CallbackInfo& info) {
   ViObject handle = static_cast<ViObject>(info[0].As<Napi::Number>().Uint32Value());
   ViStatus st = static_cast<ViStatus>(info[1].As<Napi::Number>().Int64Value());
   return Napi::String::New(env, StatusDescription(handle, st));
-#else
-  return Napi::String::New(env, "Unsupported platform");
-#endif
 }
 
 Napi::Object InitModule(Napi::Env env, Napi::Object exports) {

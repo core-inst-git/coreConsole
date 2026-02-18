@@ -4,8 +4,9 @@ Native N-API addon for NI-VISA.
 
 ## Scope
 
-- Windows x64 first (`visa64.dll`)
-- Runtime dynamic loading via `LoadLibrary`
+- Dynamic VISA runtime loading:
+  - Windows: `visa64.dll`
+  - macOS/Linux: `libvisa` candidates
 - Exposes minimal VISA calls used by `visa-service`
 
 ## Build (Windows)

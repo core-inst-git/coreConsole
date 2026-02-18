@@ -79,6 +79,18 @@ set VISA_SERVICE_MOCK=1
 npm --prefix packages\visa-service start
 ```
 
+Smoke tests (service + addon API boundary):
+
+```bat
+cd <path>\\coreConsole
+npm run visa:smoke:mock
+npm run visa:smoke
+```
+
+Platform wrapper scripts:
+- Windows PowerShell: `packages/visa-service/examples/run_windows.ps1`
+- macOS bash: `packages/visa-service/examples/run_macos.sh`
+
 ## Packaging
 ```bash
 cd GUI
