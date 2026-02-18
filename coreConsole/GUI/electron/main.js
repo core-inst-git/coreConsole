@@ -1,5 +1,6 @@
 const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const { Menu } = require('electron');
 const { spawn } = require('child_process');
 
@@ -214,9 +215,29 @@ function startBackend() {
     return;
   }
 
-  const python = process.env.COREDAQ_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+  let python = process.env.COREDAQ_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+  let pythonArgs = [];
+  let pythonSource = 'default';
+  if (process.platform === 'win32') {
+    const condaPrefix = process.env.CONDA_PREFIX || '';
+    const condaPython = condaPrefix ? path.join(condaPrefix, 'python.exe') : '';
+    if (condaPython && fs.existsSync(condaPython)) {
+      // Prefer the currently activated conda env to avoid stale system/user python.
+      python = condaPython;
+      pythonSource = 'CONDA_PREFIX';
+    } else if (process.env.COREDAQ_PYTHON) {
+      python = process.env.COREDAQ_PYTHON;
+      pythonSource = 'COREDAQ_PYTHON';
+    } else {
+      // Fallback to py launcher on Windows when plain "python" is missing.
+      python = 'py';
+      pythonArgs = ['-3'];
+      pythonSource = 'py -3';
+    }
+  }
   const script = path.join(__dirname, '../backend/coredaq_service.py');
-  backendProc = spawn(python, [script], { stdio: 'inherit' });
+  console.log(`[coreConsole] Starting backend with ${pythonSource}: ${python}`);
+  backendProc = spawn(python, [...pythonArgs, script], { stdio: 'inherit' });
   backendProc.on('error', (err) => {
     console.error(`Failed to start dev backend with ${python}`, err);
   });
