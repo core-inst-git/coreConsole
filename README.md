@@ -6,6 +6,10 @@ Standalone desktop GUI for coreDAQ instruments. Firmware and GUI are intentional
 - `GUI/`: Electron + React desktop app
 - `GUI/backend/`: Python backend service (device control, GPIB laser/sweep orchestration, streaming, HDF5 save)
 - `API/`: Python coreDAQ API used by backend
+- `API/coredaq_js_api.js`: Async Node.js coreDAQ API (serial + acquisition + transfer)
+- `packages/visa-addon/`: Native N-API addon for NI-VISA
+- `packages/visa-service/`: Stdio JSON-RPC VISA service used by Electron main
+- `packages/GPIB_ARCHITECTURE.md`: GPIB service architecture and RPC boundary
 
 ## Prerequisites
 - Node.js 20 LTS + npm 10
@@ -54,6 +58,26 @@ Notes:
 - If `npm run dev` cannot find Python, re-open the terminal so `setx` takes effect
   or re-run `set COREDAQ_PYTHON` in the current terminal.
 - You can set `COREDAQ_PYTHON` permanently via Windows System Settings.
+
+## NI-VISA / GPIB service (Windows)
+
+The Electron app uses a separate Node service + native addon for NI-VISA.
+
+Build steps:
+
+```bat
+cd <path>\coreConsole
+npm --prefix packages\visa-addon install
+npm --prefix packages\visa-addon run build
+npm --prefix packages\visa-service install
+```
+
+Optional mock run (no hardware):
+
+```bat
+set VISA_SERVICE_MOCK=1
+npm --prefix packages\visa-service start
+```
 
 ## Packaging
 ```bash

@@ -23,5 +23,31 @@ declare global {
       windowIsMaximized?: () => Promise<CoreDAQWindowState>;
       pickSavePath?: (defaultName?: string) => Promise<CoreDAQSaveDialogResult>;
     };
+    gpib?: {
+      health?: () => Promise<{
+        enabled?: boolean;
+        visaLoaded?: boolean;
+        resourceManager?: boolean;
+        gpibDetected?: boolean;
+        resourcesSample?: string[];
+        checkedPaths?: string[];
+        loadedPath?: string;
+        reason?: string;
+      }>;
+      listResources?: () => Promise<string[]>;
+      open?: (resource: string, timeoutMs?: number) => Promise<{ sessionId: string }>;
+      write?: (sessionId: string, command: string) => Promise<{ ok: boolean; bytesWritten: number }>;
+      read?: (sessionId: string, maxBytes?: number) => Promise<{ data: string }>;
+      query?: (sessionId: string, command: string, maxBytes?: number) => Promise<{ data: string }>;
+      queryResource?: (
+        resource: string,
+        command: string,
+        timeoutMs?: number,
+        maxBytes?: number,
+      ) => Promise<{ data: string }>;
+      setTimeout?: (sessionId: string, ms: number) => Promise<{ ok: boolean }>;
+      close?: (sessionId: string) => Promise<{ ok: boolean }>;
+      restartService?: () => Promise<{ ok: boolean }>;
+    };
   }
 }
