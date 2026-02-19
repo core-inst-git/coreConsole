@@ -819,18 +819,29 @@ class CoreDAQBackend {
     return series;
   }
 
-  async _gpibScan() {
+  async _gpibScan(opts = {}) {
+    const timeoutMs = Math.max(500, Math.trunc(Number(opts.timeout_ms ?? 5000)));
+    const deadlineMs = Date.now() + timeoutMs;
     const debug = [];
     const resources = this.visa.listResources();
     debug.push(`visa resources=${resources.length}`);
+    debug.push(`scan timeout=${timeoutMs}ms`);
 
     const rows = [];
+    let timedOut = false;
     for (const resource of resources) {
+      const remainingMs = deadlineMs - Date.now();
+      if (remainingMs <= 0) {
+        debug.push('scan deadline reached; returning partial resource list');
+        timedOut = true;
+        break;
+      }
       let idn = null;
       let model = null;
       try {
         // eslint-disable-next-line no-await-in-loop
-        const transport = this.visa.open(resource, 1200);
+        const ioTimeoutMs = Math.max(250, Math.min(1000, remainingMs - 100));
+        const transport = this.visa.open(resource, ioTimeoutMs);
         try {
           // eslint-disable-next-line no-await-in-loop
           idn = await transport.query('*IDN?', 2048);
@@ -851,7 +862,7 @@ class CoreDAQBackend {
       });
     }
 
-    return { rows, debug };
+    return { rows, debug, timed_out: timedOut };
   }
 
   async _gpibQuery(resource, cmd) {
@@ -1291,7 +1302,7 @@ class CoreDAQBackend {
       }
 
       if (action === 'gpib_scan') {
-        const out = await this._gpibScan();
+        const out = await this._gpibScan({ timeout_ms: data.timeout_ms ?? 5000 });
         ws.send(JSON.stringify({
           type: 'control',
           action,
