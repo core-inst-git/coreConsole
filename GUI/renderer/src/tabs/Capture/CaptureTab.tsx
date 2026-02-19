@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import CaptureMiniChart from '@/components/CaptureMiniChart';
 import { DeviceStatus, gainDisplayLabel, sendControl, subscribeControl, subscribeStatus } from '@/coredaqClient';
 import { VirtualChannelDef, VirtualMathType, parsePhysicalSourceId, physicalSourceId } from '@/virtualChannels';
@@ -189,6 +189,8 @@ export default function CaptureTab({
   const [hasSweepData, setHasSweepData] = useState(false);
   const [running, setRunning] = useState(false);
   const [runningDeviceId, setRunningDeviceId] = useState<string | null>(null);
+  const [scanningVisa, setScanningVisa] = useState(false);
+  const [scanProgressPct, setScanProgressPct] = useState(0);
 
   const [active, setActive] = useState<ChannelDef[]>(() =>
     PHYS_CHANNELS.map((c) => ({ ...c, type: 'physical' }))
@@ -246,9 +248,9 @@ export default function CaptureTab({
     });
   }, [selectedVirtualDefs]);
 
-  const addLog = (text: string) => {
+  const addLog = useCallback((text: string) => {
     setLogs((prev) => [...prev.slice(-199), { ts: tsNow(), text }]);
-  };
+  }, []);
 
   const warnUser = (message: string) => {
     addLog(message);
@@ -261,6 +263,28 @@ export default function CaptureTab({
     const samples = Math.max(1, Math.round(duration * sampleRateHz));
     return { duration, samples, span };
   }, [startNm, stopNm, speedNmS, sampleRateHz]);
+
+  useEffect(() => {
+    if (!scanningVisa) return () => undefined;
+    const started = performance.now();
+    setScanProgressPct(8);
+    const id = window.setInterval(() => {
+      const elapsed = performance.now() - started;
+      const pct = Math.min(95, 8 + (elapsed / 5000) * 87);
+      setScanProgressPct(pct);
+    }, 80);
+    return () => window.clearInterval(id);
+  }, [scanningVisa, addLog]);
+
+  useEffect(() => {
+    if (!scanningVisa) return () => undefined;
+    const timeoutId = window.setTimeout(() => {
+      setScanningVisa(false);
+      setScanProgressPct(0);
+      addLog('GPIB scan timed out at 5 s.');
+    }, 5200);
+    return () => window.clearTimeout(timeoutId);
+  }, [scanningVisa]);
 
   useEffect(() => {
     const unsubStatus = subscribeStatus((s) => {
@@ -278,10 +302,16 @@ export default function CaptureTab({
       if (!msg.action) return;
 
       if (msg.action === 'gpib_scan') {
+        setScanningVisa(false);
+        setScanProgressPct(100);
+        window.setTimeout(() => setScanProgressPct(0), 250);
         if (msg.ok) {
           const rows = Array.isArray(msg.resources) ? (msg.resources as GpibResource[]) : [];
           setResources(rows);
           addLog(`GPIB scan complete: ${rows.length} resource(s)`);
+          if (msg.timed_out) {
+            addLog('GPIB scan reached 5 s timeout; showing partial results.');
+          }
           const debugRows = Array.isArray(msg.debug) ? (msg.debug as unknown[]) : [];
           for (const d of debugRows) {
             addLog(`VISA: ${String(d)}`);
@@ -382,7 +412,12 @@ export default function CaptureTab({
     };
   }, [runningDeviceId]);
 
-  const doScan = () => sendControl({ action: 'gpib_scan' });
+  const doScan = () => {
+    if (scanningVisa) return;
+    setScanningVisa(true);
+    setScanProgressPct(4);
+    sendControl({ action: 'gpib_scan', timeout_ms: 5000 });
+  };
 
   const doQuery = () => {
     const cmd = gpibCmd.trim();
@@ -596,7 +631,6 @@ export default function CaptureTab({
       <div className="live-header">
         <div>
           <div className="live-title">Spectrum Analyzer</div>
-          <div className="live-sub">Triggered sweep capture in power units. Speed in nm/s, laser power in mW.</div>
         </div>
         <div className={`capture-state ${captureState === 'running' ? 'run' : 'idle'}`}>
           {captureState === 'running' ? 'Running' : 'Idle'}
@@ -636,10 +670,15 @@ export default function CaptureTab({
             </div>
 
             <div className="capture-toolbar">
-              <button className="btn ghost" onClick={doScan}>
-                Scan VISA
+              <button className="btn ghost" onClick={doScan} disabled={scanningVisa}>
+                {scanningVisa ? 'Scanning...' : 'Scan VISA'}
               </button>
             </div>
+            {scanningVisa && (
+              <div className="scan-progress">
+                <div className="scan-progress-bar" style={{ width: `${scanProgressPct}%` }} />
+              </div>
+            )}
 
             <div className="capture-field">
               <label className="capture-label">Resource</label>
