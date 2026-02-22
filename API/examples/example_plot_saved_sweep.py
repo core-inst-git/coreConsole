@@ -24,7 +24,21 @@ start_nm = float(payload["start_nm"])
 stop_nm = float(payload["stop_nm"])
 channels_w = payload["channels_w"]
 
-y_w = np.asarray(channels_w[CHANNEL_INDEX], dtype=np.float64)
+# Supports both saved layouts:
+# 1) [[...], [...], ...]
+# 2) [{index,name,data_w}, ...]
+if isinstance(channels_w[0], dict):
+    y_raw = None
+    for ch in channels_w:
+        if int(ch.get("index", -1)) == CHANNEL_INDEX:
+            y_raw = ch.get("data_w", [])
+            break
+    if y_raw is None:
+        raise ValueError(f"Channel CH{CHANNEL_INDEX + 1} not found in file.")
+else:
+    y_raw = channels_w[CHANNEL_INDEX]
+
+y_w = np.asarray(y_raw, dtype=np.float64)
 if y_w.size == 0:
     raise ValueError(f"Channel CH{CHANNEL_INDEX + 1} has no data.")
 
