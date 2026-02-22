@@ -5,12 +5,11 @@ type Props = {
   connected: boolean;
   devices: DeviceStatus[];
   activeDeviceId: string | null;
-  onSelectDevice: (deviceId: string) => void;
 };
 
 type Step = 'idle' | 'confirm' | 'running' | 'done' | 'error';
 
-export default function CalibrationTab({ connected, devices, activeDeviceId, onSelectDevice }: Props) {
+export default function CalibrationTab({ connected, devices, activeDeviceId }: Props) {
   const linearDevices = useMemo(
     () =>
       [...devices]
@@ -79,22 +78,7 @@ export default function CalibrationTab({ connected, devices, activeDeviceId, onS
       <div className="panel cal-panel">
         <div className="capture-field">
           <label className="capture-label">Target Device</label>
-          <select
-            className="capture-input"
-            value={targetDeviceId}
-            onChange={(e) => {
-              const v = e.target.value;
-              setTargetDeviceId(v);
-              if (v) onSelectDevice(v);
-            }}
-          >
-            <option value="">Select LINEAR device...</option>
-            {linearDevices.map((d) => (
-              <option key={d.device_id} value={d.device_id}>
-                {d.device_id}
-              </option>
-            ))}
-          </select>
+          <div className="capture-readonly">{targetDeviceId || 'No active LINEAR device'}</div>
         </div>
 
         {linearDevices.length === 0 && (

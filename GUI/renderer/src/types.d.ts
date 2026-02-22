@@ -22,6 +22,7 @@ declare global {
       windowClose?: () => Promise<{ ok: boolean }>;
       windowIsMaximized?: () => Promise<CoreDAQWindowState>;
       pickSavePath?: (defaultName?: string) => Promise<CoreDAQSaveDialogResult>;
+      listSerialPorts?: () => Promise<{ ports?: string[]; debug?: string[] }>;
     };
     gpib?: {
       health?: () => Promise<{
@@ -45,6 +46,15 @@ declare global {
         timeoutMs?: number,
         maxBytes?: number,
       ) => Promise<{ data: string }>;
+      probeIdn?: (
+        resource: string,
+        timeoutMs?: number,
+        maxBytes?: number,
+      ) => Promise<{
+        ok: boolean;
+        data?: string;
+        error?: { code?: string; status?: number; message?: string };
+      }>;
       setTimeout?: (sessionId: string, ms: number) => Promise<{ ok: boolean }>;
       close?: (sessionId: string) => Promise<{ ok: boolean }>;
       restartService?: () => Promise<{ ok: boolean }>;

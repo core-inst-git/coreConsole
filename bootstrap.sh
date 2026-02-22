@@ -31,13 +31,18 @@ echo "[coreConsole] install GUI deps"
 npm --prefix GUI install
 
 echo "[coreConsole] install visa-addon deps"
-npm --prefix packages/visa-addon install
+npm run visa:addon:install
 
 echo "[coreConsole] install visa-service deps"
 npm --prefix packages/visa-service install
 
 echo "[coreConsole] build visa-addon"
-npm --prefix packages/visa-addon run build
+if ! npm run visa:addon:build; then
+  echo "[coreConsole] error: VISA addon native build failed."
+  echo "  Ensure Python + C/C++ build tools are installed (node-gyp prerequisites)."
+  echo "  NI-VISA/NI-488.2 are runtime prerequisites for GPIB hardware access."
+  exit 1
+fi
 
 echo "[coreConsole] check visa-service"
 npm run visa:service:check

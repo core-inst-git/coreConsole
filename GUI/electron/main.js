@@ -1,8 +1,9 @@
 const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const net = require('net');
 const { Menu } = require('electron');
-const { spawn } = require('child_process');
+const { spawn, execFile } = require('child_process');
 const { VisaServiceClient } = require('./visaServiceClient');
 
 const isDev = !app.isPackaged;
@@ -11,6 +12,121 @@ const devURL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
 let mainWindow;
 let backendProc;
 let visaClient;
+let visaDialogsEnabled = true;
+let backendStartErrorShown = false;
+const BACKEND_WS_HOST = '127.0.0.1';
+const BACKEND_WS_PORT = 8765;
+
+function sortPortPaths(paths) {
+  const uniq = [...new Set((paths || []).map((p) => String(p || '').trim()).filter(Boolean))];
+  return uniq.sort((a, b) => {
+    const am = /^COM(\d+)$/i.exec(a);
+    const bm = /^COM(\d+)$/i.exec(b);
+    if (am && bm) return Number(am[1]) - Number(bm[1]);
+    if (am) return -1;
+    if (bm) return 1;
+    return a.localeCompare(b);
+  });
+}
+
+function execText(file, args, timeoutMs = 6000) {
+  return new Promise((resolve) => {
+    execFile(file, args, { windowsHide: true, timeout: timeoutMs }, (err, stdout) => {
+      if (err) {
+        resolve({ ok: false, stdout: '', error: String(err?.message || err) });
+        return;
+      }
+      resolve({ ok: true, stdout: String(stdout || ''), error: null });
+    });
+  });
+}
+
+async function listSerialPortsMain() {
+  const debug = [];
+  let ports = [];
+
+  try {
+    const sp = require('serialport');
+    const SerialPort = sp?.SerialPort || sp?.default || sp;
+    const rows = await SerialPort.list();
+    ports = Array.isArray(rows)
+      ? rows.map((r) => String(r?.path || '').trim()).filter(Boolean)
+      : [];
+    debug.push(`serialport.list=${ports.length}`);
+  } catch (err) {
+    debug.push(`serialport.error=${String(err?.message || err)}`);
+  }
+
+  if (ports.length === 0) {
+    const reg = await execText('reg.exe', ['query', 'HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM']);
+    if (reg.ok) {
+      const regPorts = [];
+      for (const line of reg.stdout.split(/\r?\n/g)) {
+        const m = line.match(/\bCOM\d+\b/gi);
+        if (m && m.length > 0) regPorts.push(...m);
+      }
+      ports = sortPortPaths(regPorts);
+      debug.push(`fallback.registry=${ports.length}`);
+    } else {
+      debug.push(`fallback.registry.error=${reg.error}`);
+    }
+  }
+
+  if (ports.length === 0) {
+    const cim = await execText(
+      'powershell.exe',
+      ['-NoProfile', '-Command', 'Get-CimInstance Win32_SerialPort | Select-Object -ExpandProperty DeviceID'],
+      7000,
+    );
+    if (cim.ok) {
+      ports = cim.stdout
+        .split(/\r?\n/g)
+        .map((line) => line.trim())
+        .filter((line) => /^COM\d+$/i.test(line));
+      ports = sortPortPaths(ports);
+      debug.push(`fallback.cim=${ports.length}`);
+    } else {
+      debug.push(`fallback.cim.error=${cim.error}`);
+    }
+  }
+
+  if (ports.length === 0) {
+    const dotnet = await execText(
+      'powershell.exe',
+      ['-NoProfile', '-Command', '[System.IO.Ports.SerialPort]::GetPortNames() | ForEach-Object { $_ }'],
+      5000,
+    );
+    if (dotnet.ok) {
+      ports = dotnet.stdout
+        .split(/\r?\n/g)
+        .map((line) => line.trim())
+        .filter((line) => /^COM\d+$/i.test(line));
+      ports = sortPortPaths(ports);
+      debug.push(`fallback.dotnet=${ports.length}`);
+    } else {
+      debug.push(`fallback.dotnet.error=${dotnet.error}`);
+    }
+  }
+
+  return { ports: sortPortPaths(ports), debug };
+}
+
+function isPortInUse(host, port) {
+  return new Promise((resolve) => {
+    const tester = net.createServer();
+    tester.once('error', (err) => {
+      if (err && err.code === 'EADDRINUSE') {
+        resolve(true);
+        return;
+      }
+      resolve(false);
+    });
+    tester.once('listening', () => {
+      tester.close(() => resolve(false));
+    });
+    tester.listen(port, host);
+  });
+}
 
 function emitWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -207,11 +323,22 @@ function buildMenu() {
 }
 
 function startBackend() {
-  const startJsBackend = () => {
+  const startJsBackend = async () => {
     const script = path.join(__dirname, '../backend/coredaq_service.js');
     if (!fs.existsSync(script)) {
       console.error(`[coreConsole] JS backend script not found: ${script}`);
       return;
+    }
+    try {
+      const portBusy = await isPortInUse(BACKEND_WS_HOST, BACKEND_WS_PORT);
+      if (portBusy) {
+        console.warn(
+          `[coreConsole] Backend ws://${BACKEND_WS_HOST}:${BACKEND_WS_PORT} already in use. Reusing existing backend process.`,
+        );
+        return;
+      }
+    } catch (err) {
+      console.warn('[coreConsole] backend port probe failed:', err?.message || err);
     }
 
     const env = {
@@ -225,12 +352,19 @@ function startBackend() {
     const laserJsPath = isDev
       ? path.resolve(__dirname, '..', '..', 'packages', 'laser-js')
       : path.join(process.resourcesPath, 'laser-js');
-    const guiNodeModulesPath = isDev
-      ? path.resolve(__dirname, '..', 'node_modules')
-      : path.join(process.resourcesPath, 'app.asar', 'node_modules');
+    const guiNodeModulesPaths = isDev
+      ? [path.resolve(__dirname, '..', 'node_modules')]
+      : [
+        path.join(process.resourcesPath, 'app.asar', 'node_modules'),
+        path.join(process.resourcesPath, 'app.asar.unpacked', 'node_modules'),
+      ];
     if (fs.existsSync(apiPath)) env.COREDAQ_API_PATH = apiPath;
     if (fs.existsSync(laserJsPath)) env.COREDAQ_LASER_JS_PATH = laserJsPath;
-    if (fs.existsSync(guiNodeModulesPath)) env.COREDAQ_GUI_NODE_MODULES_PATH = guiNodeModulesPath;
+    const resolvedGuiNodeModulesPaths = guiNodeModulesPaths
+      .filter((p) => !isDev || fs.existsSync(p));
+    if (resolvedGuiNodeModulesPaths.length > 0) {
+      env.COREDAQ_GUI_NODE_MODULES_PATH = resolvedGuiNodeModulesPaths.join(path.delimiter);
+    }
 
     const addonPath = isDev
       ? path.resolve(__dirname, '..', '..', 'packages', 'visa-addon', 'build', 'Release', 'visa_addon.node')
@@ -240,17 +374,34 @@ function startBackend() {
       env.VISA_ADDON_PATH = addonPath;
     }
 
+    const backendCwd = isDev ? path.join(__dirname, '..') : process.resourcesPath;
     backendProc = spawn(process.execPath, [script], {
       stdio: 'inherit',
       env,
-      cwd: path.join(__dirname, '..'),
+      cwd: backendCwd,
     });
     console.log(`[coreConsole] Starting JS backend: ${script}`);
     backendProc.on('error', (err) => {
       console.error(`Failed to start JS backend at ${script}`, err);
+      if (!isDev && !backendStartErrorShown) {
+        backendStartErrorShown = true;
+        dialog.showMessageBox({
+          type: 'error',
+          buttons: ['OK'],
+          title: 'Backend Startup Failed',
+          message: 'coreConsole backend failed to start.',
+          detail: `Script: ${script}\nCWD: ${backendCwd}\nError: ${String(err?.message || err)}`,
+        }).catch(() => {});
+      }
+    });
+    backendProc.on('exit', (code, signal) => {
+      console.warn(`[coreConsole] JS backend exited code=${code} signal=${signal || 'none'}`);
+      backendProc = null;
     });
   };
-  startJsBackend();
+  startJsBackend().catch((err) => {
+    console.error('[coreConsole] Failed to start JS backend:', err);
+  });
 }
 
 function shouldEnableVisaService() {
@@ -284,24 +435,31 @@ function showVisaBootErrorDialog(err) {
   }).catch(() => {});
 }
 
-async function startVisaService() {
+async function startVisaService(opts = {}) {
+  const silent = opts?.silent === true;
+  visaDialogsEnabled = !silent;
   if (!shouldEnableVisaService()) return;
-  if (visaClient) return;
+  if (!visaClient) {
+    visaClient = new VisaServiceClient({
+      isDev,
+      autoRestart: true,
+      bootTimeoutMs: 25000,
+      onBootError: (err) => {
+        if (visaDialogsEnabled) showVisaBootErrorDialog(err);
+      },
+      onBootOk: (_health) => {
+        // no-op; consumers call gpib:health on demand
+      },
+    });
+  }
 
-  visaClient = new VisaServiceClient({
-    isDev,
-    autoRestart: true,
-    onBootError: showVisaBootErrorDialog,
-    onBootOk: (_health) => {
-      // no-op; consumers call gpib:health on demand
-    },
-  });
-
-  try {
-    await visaClient.start();
-  } catch (err) {
-    console.warn('[coreConsole] VISA service failed to start:', err);
-    showVisaBootErrorDialog(err);
+  if (visaClient) {
+    try {
+      await visaClient.start();
+    } catch (err) {
+      console.warn('[coreConsole] VISA service failed to start:', err);
+      if (!silent && visaDialogsEnabled) showVisaBootErrorDialog(err);
+    }
   }
 }
 
@@ -309,7 +467,10 @@ app.whenReady().then(() => {
   createWindow();
   buildMenu();
   startBackend();
-  startVisaService();
+  // Pre-warm VISA service in the background so first scan does not hit cold-start timeout.
+  setTimeout(() => {
+    startVisaService({ silent: true }).catch(() => {});
+  }, 1200);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -376,6 +537,10 @@ ipcMain.handle('coredaq:pick-save-path', async (_event, opts) => {
   };
 });
 
+ipcMain.handle('coredaq:list-serial-ports', async () => {
+  return listSerialPortsMain();
+});
+
 ipcMain.handle('gpib:health', async () => {
   if (!shouldEnableVisaService()) {
     return {
@@ -433,6 +598,31 @@ ipcMain.handle('gpib:query', async (_event, payload) => {
     maxBytes: payload?.maxBytes,
     timeoutMs: payload?.timeoutMs,
   });
+});
+
+ipcMain.handle('gpib:probe-idn', async (_event, payload) => {
+  await startVisaService();
+  if (!visaClient) return { ok: false, error: { code: 'SERVICE_UNAVAILABLE', message: 'GPIB service unavailable' } };
+  const resource = String(payload?.resource || '').trim();
+  if (!resource) return { ok: false, error: { code: 'INVALID_ARGUMENT', message: 'resource is required' } };
+  try {
+    const out = await visaClient.request('query', {
+      resource,
+      command: '*IDN?\n',
+      timeoutMs: payload?.timeoutMs,
+      maxBytes: payload?.maxBytes,
+    });
+    return { ok: true, data: String(out?.data || '') };
+  } catch (err) {
+    return {
+      ok: false,
+      error: {
+        code: String(err?.code || 'VISA_ERROR'),
+        status: typeof err?.status !== 'undefined' ? err.status : undefined,
+        message: String(err?.message || err),
+      },
+    };
+  }
 });
 
 ipcMain.handle('gpib:set-timeout', async (_event, payload) => {

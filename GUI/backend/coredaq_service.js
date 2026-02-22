@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const Module = require('module');
+const { execFile } = require('child_process');
 const { WebSocketServer } = require('ws');
 
 const ROOT = path.resolve(__dirname, '..', '..');
@@ -13,15 +14,28 @@ const API_PATH = process.env.COREDAQ_API_PATH
 const LASER_JS_PATH = process.env.COREDAQ_LASER_JS_PATH
   ? path.resolve(process.env.COREDAQ_LASER_JS_PATH)
   : path.join(ROOT, 'packages', 'laser-js');
-const GUI_NODE_MODULES_PATH = process.env.COREDAQ_GUI_NODE_MODULES_PATH
-  ? path.resolve(process.env.COREDAQ_GUI_NODE_MODULES_PATH)
-  : path.join(ROOT, 'GUI', 'node_modules');
+const GUI_NODE_MODULES_PATHS = process.env.COREDAQ_GUI_NODE_MODULES_PATH
+  ? String(process.env.COREDAQ_GUI_NODE_MODULES_PATH)
+    .split(path.delimiter)
+    .map((p) => String(p || '').trim())
+    .filter(Boolean)
+    .map((p) => path.resolve(p))
+  : [path.join(ROOT, 'GUI', 'node_modules')];
+
+function pathLikelyResolvable(p) {
+  const txt = String(p || '');
+  if (!txt) return false;
+  // Paths inside app.asar can be resolvable by Node/Electron module loader
+  // even when fs.existsSync reports false from a run-as-node child.
+  if (txt.includes('.asar')) return true;
+  return fs.existsSync(txt);
+}
 
 const extraNodePaths = [
-  GUI_NODE_MODULES_PATH,
+  ...GUI_NODE_MODULES_PATHS,
   path.join(API_PATH, 'node_modules'),
   path.join(LASER_JS_PATH, 'node_modules'),
-].filter((p) => fs.existsSync(p));
+].filter((p) => pathLikelyResolvable(p));
 if (extraNodePaths.length > 0) {
   const existing = process.env.NODE_PATH ? process.env.NODE_PATH.split(path.delimiter) : [];
   process.env.NODE_PATH = [...extraNodePaths, ...existing].join(path.delimiter);
@@ -33,20 +47,48 @@ const {
   detectLaserModel,
   createLaserFromIdn,
 } = require(path.join(LASER_JS_PATH, 'index.js'));
+const { VisaServiceClient } = require(path.join(__dirname, '..', 'electron', 'visaServiceClient.js'));
 
 const SWEEP_SAMPLE_RATE_DEFAULT_HZ = 50_000;
 const SWEEP_SAMPLE_RATE_MAX_HZ = 100_000;
-const SWEEP_TRANSFER_OVERHEAD_S = 1.2;
+const SWEEP_POST_START_SETTLE_S = 1.0;
+const SWEEP_FINISH_POLL_TIMEOUT_S = 8.0;
+const SWEEP_FINISH_POLL_INTERVAL_MS = 250;
 const LIVE_STREAM_TARGET_HZ = 500;
 const LIVE_STREAM_PERIOD_MS = Math.max(1, Math.round(1000 / LIVE_STREAM_TARGET_HZ));
 const STREAM_MAX_CONSEC_ERRORS = 5;
 const COREDAQ_READY_STATE = 4;
 const DISCOVERY_INTERVAL_MS = 2000;
+const DISCOVERY_OPEN_RETRY_BACKOFF_MS = 3000;
+const DISCOVERY_OPEN_RETRY_SETTLE_MS = 350;
+const MAX_CONNECTED_DEVICES = 2;
+const MANUAL_CONNECT_PROBE_TIMEOUT_MS = 1000;
 
 const WS_HOST = '127.0.0.1';
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms | 0)));
+}
+
+function withTimeout(promise, timeoutMs, timeoutCode = 'TIMEOUT') {
+  const ms = Math.max(1, Math.round(Number(timeoutMs) || 1));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const e = new Error(`Operation timed out after ${ms} ms`);
+      e.code = timeoutCode;
+      reject(e);
+    }, ms);
+    Promise.resolve(promise).then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
 }
 
 function nowSec() {
@@ -170,73 +212,195 @@ function isoUtcNow() {
   return new Date().toISOString();
 }
 
+function sortPortPaths(paths) {
+  const uniq = [...new Set((paths || []).map((p) => String(p || '').trim()).filter(Boolean))];
+  return uniq.sort((a, b) => {
+    const am = /^COM(\d+)$/i.exec(a);
+    const bm = /^COM(\d+)$/i.exec(b);
+    if (am && bm) return Number(am[1]) - Number(bm[1]);
+    if (am) return -1;
+    if (bm) return 1;
+    return a.localeCompare(b);
+  });
+}
+
+function listWindowsComPortsFallback() {
+  if (process.platform !== 'win32') return Promise.resolve([]);
+  return new Promise((resolve) => {
+    execFile(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-Command',
+        '[System.IO.Ports.SerialPort]::GetPortNames() | ForEach-Object { $_ }',
+      ],
+      { windowsHide: true, timeout: 5000 },
+      (err, stdout) => {
+        if (err) {
+          resolve([]);
+          return;
+        }
+        const ports = String(stdout || '')
+          .split(/\r?\n/g)
+          .map((line) => line.trim())
+          .filter(Boolean);
+        resolve(sortPortPaths(ports));
+      },
+    );
+  });
+}
+
+function listWindowsComPortsFromRegistry() {
+  if (process.platform !== 'win32') return Promise.resolve([]);
+  return new Promise((resolve) => {
+    execFile(
+      'reg.exe',
+      ['query', 'HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM'],
+      { windowsHide: true, timeout: 5000 },
+      (err, stdout) => {
+        if (err) {
+          resolve([]);
+          return;
+        }
+        const ports = [];
+        for (const line of String(stdout || '').split(/\r?\n/g)) {
+          const m = line.match(/\bCOM\d+\b/gi);
+          if (m && m.length > 0) ports.push(...m);
+        }
+        resolve(sortPortPaths(ports));
+      },
+    );
+  });
+}
+
+function listWindowsComPortsFromCim() {
+  if (process.platform !== 'win32') return Promise.resolve([]);
+  return new Promise((resolve) => {
+    execFile(
+      'powershell.exe',
+      [
+        '-NoProfile',
+        '-Command',
+        'Get-CimInstance Win32_SerialPort | Select-Object -ExpandProperty DeviceID',
+      ],
+      { windowsHide: true, timeout: 6000 },
+      (err, stdout) => {
+        if (err) {
+          resolve([]);
+          return;
+        }
+        const ports = String(stdout || '')
+          .split(/\r?\n/g)
+          .map((line) => line.trim())
+          .filter((line) => /^COM\d+$/i.test(line));
+        resolve(sortPortPaths(ports));
+      },
+    );
+  });
+}
+
+function prioritizePortPath(paths, preferredPort) {
+  const preferred = String(preferredPort || '').trim();
+  if (!preferred) return sortPortPaths(paths);
+  const sorted = sortPortPaths(paths);
+  const rest = sorted.filter((p) => p.toUpperCase() !== preferred.toUpperCase());
+  return [preferred, ...rest];
+}
+
 class VisaSessionTransport {
-  constructor(manager, sessionHandle) {
+  constructor(manager, resource, timeoutMs = 4000) {
     this.manager = manager;
-    this.sessionHandle = sessionHandle;
+    this.resource = String(resource || '').trim();
+    this.timeoutMs = Math.max(100, Number(timeoutMs) || 4000);
+    this.sessionId = null;
+  }
+
+  async ensureOpen() {
+    if (this.sessionId) return this.sessionId;
+    if (!this.resource) throw new Error('No VISA resource provided');
+    const out = await this.manager.request('open', {
+      resource: this.resource,
+      timeoutMs: this.timeoutMs,
+    }, Math.max(8000, this.timeoutMs + 4000));
+    const id = String(out?.sessionId || '').trim();
+    if (!id) throw new Error('Failed to open VISA session');
+    this.sessionId = id;
+    return this.sessionId;
   }
 
   async write(cmd) {
-    if (!this.sessionHandle) throw new Error('VISA session is closed');
+    const sessionId = await this.ensureOpen();
     let line = String(cmd || '');
     if (!line.endsWith('\n')) line = `${line}\n`;
-    this.manager.addon.write(this.sessionHandle, line);
+    await this.manager.request('write', {
+      sessionId,
+      command: line,
+    }, Math.max(2000, this.timeoutMs + 1000));
   }
 
   async query(cmd, maxBytes = 8192) {
-    await this.write(cmd);
-    if (!this.sessionHandle) throw new Error('VISA session is closed');
-    const raw = this.manager.addon.read(this.sessionHandle, Math.max(64, Number(maxBytes) || 8192));
-    const data = Buffer.isBuffer(raw) ? raw.toString('ascii') : String(raw || '');
-    return data.replace(/\r+$/g, '').trim();
+    const sessionId = await this.ensureOpen();
+    let line = String(cmd || '');
+    if (!line.endsWith('\n')) line = `${line}\n`;
+    const out = await this.manager.request('query', {
+      sessionId,
+      command: line,
+      maxBytes: Math.max(64, Number(maxBytes) || 8192),
+      timeoutMs: this.timeoutMs,
+    }, Math.max(2500, this.timeoutMs + 1200));
+    return String(out?.data || '').replace(/\r+$/g, '').trim();
   }
 
   async close() {
-    if (!this.sessionHandle) return;
+    if (!this.sessionId) return;
+    const sessionId = this.sessionId;
+    this.sessionId = null;
     try {
-      this.manager.addon.close(this.sessionHandle);
+      await this.manager.request('close', { sessionId }, 5000);
     } catch (_) {
       // ignore close errors
     }
-    this.sessionHandle = null;
   }
 }
 
 class VisaManager {
   constructor() {
-    this.addon = null;
-    this.rmHandle = null;
+    this.client = null;
     this.bootError = null;
+    this.isDev = !String(__dirname).includes('app.asar');
   }
 
-  _resolveAddonModule() {
-    const explicitAddonNode = process.env.COREDAQ_VISA_ADDON_PATH || process.env.VISA_ADDON_PATH || '';
-    if (explicitAddonNode) {
-      return require(explicitAddonNode);
+  _asBootError(err) {
+    return {
+      code: err?.code || 'NI_VISA_NOT_FOUND',
+      message: err?.message || String(err),
+      checkedPaths: Array.isArray(err?.checkedPaths) ? err.checkedPaths : [],
+    };
+  }
+
+  async ensureStarted() {
+    if (!this.client) {
+      this.client = new VisaServiceClient({
+        isDev: this.isDev,
+        autoRestart: true,
+      });
     }
-    return require(path.join(ROOT, 'packages', 'visa-addon'));
-  }
-
-  ensureReady() {
-    if (this.addon && this.rmHandle) return;
     try {
-      this.addon = this._resolveAddonModule();
-      this.rmHandle = this.addon.init();
+      await this.client.start();
       this.bootError = null;
+      return this.client;
     } catch (err) {
-      this.bootError = {
-        code: err?.code || 'NI_VISA_NOT_FOUND',
-        message: err?.message || String(err),
-        checkedPaths: Array.isArray(err?.checkedPaths) ? err.checkedPaths : [],
-      };
+      this.bootError = this._asBootError(err);
       throw err;
     }
   }
 
-  health() {
+  async health() {
     try {
-      this.ensureReady();
-    } catch (_) {
+      const client = await this.ensureStarted();
+      const h = await client.health();
+      return { enabled: true, ...(h || {}) };
+    } catch (err) {
       return {
         enabled: false,
         visaLoaded: false,
@@ -244,44 +408,35 @@ class VisaManager {
         gpibDetected: false,
         resourcesSample: [],
         checkedPaths: this.bootError?.checkedPaths || [],
-        error: this.bootError,
+        error: this._asBootError(err),
       };
     }
-
-    const base = typeof this.addon.health === 'function' ? (this.addon.health() || {}) : {};
-    const resources = this.listResourcesSafe();
-    return {
-      enabled: true,
-      ...base,
-      resourceManager: true,
-      resourcesSample: resources.slice(0, 8),
-      gpibDetected: resources.some((r) => /^GPIB\d+::/i.test(String(r))),
-    };
   }
 
-  listResourcesSafe() {
-    try {
-      this.ensureReady();
-      const rows = this.addon.listResources(this.rmHandle);
-      return Array.isArray(rows) ? rows.map((x) => String(x)) : [];
-    } catch (_) {
-      return [];
-    }
+  async request(method, params = {}, timeoutMs = 15000) {
+    const client = await this.ensureStarted();
+    return client.request(method, params, timeoutMs);
   }
 
-  listResources() {
-    this.ensureReady();
-    const rows = this.addon.listResources(this.rmHandle);
+  async listResources() {
+    const rows = await this.request('listResources', {}, 12000);
     return Array.isArray(rows) ? rows.map((x) => String(x)) : [];
   }
 
   open(resource, timeoutMs = 4000) {
-    this.ensureReady();
     const res = String(resource || '').trim();
     if (!res) throw new Error('No VISA resource provided');
-    const handle = this.addon.open(this.rmHandle, res);
-    this.addon.setTimeout(handle, Math.max(100, Number(timeoutMs) || 4000));
-    return new VisaSessionTransport(this, handle);
+    return new VisaSessionTransport(this, res, timeoutMs);
+  }
+
+  async stop() {
+    if (!this.client) return;
+    try {
+      await this.client.stop();
+    } finally {
+      this.client = null;
+      this.bootError = null;
+    }
   }
 }
 
@@ -297,6 +452,9 @@ class CoreDAQBackend {
     this.activeDeviceId = null;
     this.lastDiscoveryMs = 0;
     this.discoveryInFlight = false;
+    this.portRetryAtMs = new Map();
+    this.manualTargetPorts = new Set();
+    this.lastSerialPortDebug = [];
 
     this.streamEnabledGlobal = true;
 
@@ -320,6 +478,7 @@ class CoreDAQBackend {
     }
     this.devices.clear();
     this.portToDevice.clear();
+    await this.visa.stop().catch(() => {});
   }
 
   _deviceStatusPayload(s) {
@@ -384,6 +543,262 @@ class CoreDAQBackend {
     return entries[0][0];
   }
 
+  async _discoverCandidatePorts() {
+    if (this.portOverride) {
+      const listed = await this._listSerialPorts();
+      return prioritizePortPath([this.portOverride, ...listed], this.portOverride);
+    }
+    if (this.manualTargetPorts.size > 0) {
+      return sortPortPaths([...this.manualTargetPorts.values()]);
+    }
+    const envPort = String(process.env.COREDAQ_PORT || process.env.COREDAQ_PORT_HINT || '').trim();
+    if (envPort) {
+      return prioritizePortPath([envPort], envPort);
+    }
+    return [];
+  }
+
+  async _listSerialPorts() {
+    const debug = [];
+    let ports = [];
+    try {
+      const sp = require('serialport');
+      const SerialPort = sp?.SerialPort || sp?.default || sp;
+      const rows = await SerialPort.list();
+      ports = Array.isArray(rows)
+        ? rows.map((r) => String(r?.path || '').trim()).filter(Boolean)
+        : [];
+      debug.push(`serialport.list=${ports.length}`);
+    } catch (err) {
+      console.warn('[coredaq-service] serialport list failed:', err?.message || err);
+      debug.push(`serialport.error=${String(err?.message || err)}`);
+    }
+    if (ports.length === 0) {
+      const regPorts = await listWindowsComPortsFromRegistry();
+      if (regPorts.length > 0) {
+        ports = regPorts;
+        debug.push(`fallback.registry=${regPorts.length}`);
+      } else {
+        debug.push('fallback.registry=0');
+      }
+    }
+    if (ports.length === 0) {
+      const cimPorts = await listWindowsComPortsFromCim();
+      if (cimPorts.length > 0) {
+        ports = cimPorts;
+        debug.push(`fallback.cim=${cimPorts.length}`);
+      } else {
+        debug.push('fallback.cim=0');
+      }
+    }
+    if (ports.length === 0) {
+      const fallback = await listWindowsComPortsFallback();
+      if (fallback.length > 0) {
+        console.warn(`[coredaq-service] using Windows COM fallback list (${fallback.length} ports).`);
+        ports = fallback;
+        debug.push(`fallback.winapi=${fallback.length}`);
+      } else {
+        debug.push('fallback.winapi=0');
+      }
+    }
+    debug.push(`node_path=${String(process.env.NODE_PATH || '').split(path.delimiter).length}`);
+    const out = sortPortPaths(ports);
+    this.lastSerialPortDebug = debug;
+    return out;
+  }
+
+  async _connectPort(port, { probeTimeoutMs = 0 } = {}) {
+    const portPath = String(port || '').trim();
+    if (!portPath) {
+      return { ok: false, code: 'INVALID_PORT', error: new Error('No COM port selected.') };
+    }
+
+    const existingDeviceId = this.portToDevice.get(portPath);
+    if (existingDeviceId && this.devices.has(existingDeviceId)) {
+      return { ok: true, reused: true, deviceId: existingDeviceId };
+    }
+
+    if (this.devices.size >= MAX_CONNECTED_DEVICES) {
+      return {
+        ok: false,
+        code: 'MAX_DEVICES',
+        error: new Error(`Maximum ${MAX_CONNECTED_DEVICES} CoreDAQ devices can be connected.`),
+      };
+    }
+
+    if (probeTimeoutMs > 0 && typeof CoreDAQ._probe_idn === 'function') {
+      let probeOk = false;
+      try {
+        probeOk = await withTimeout(
+          CoreDAQ._probe_idn(portPath, 115200, 0.15),
+          probeTimeoutMs,
+          'COREDAQ_PROBE_TIMEOUT',
+        );
+      } catch (_) {
+        probeOk = false;
+      }
+      if (!probeOk) {
+        return {
+          ok: false,
+          code: 'NOT_COREDAQ',
+          error: new Error(`${portPath} did not identify as CoreDAQ within 1 second.`),
+        };
+      }
+    }
+
+    let dev = null;
+    let openErr = null;
+    const openTimeouts = [
+      Math.max(this.timeoutS, 0.5),
+      1.5,
+      3.0,
+    ].filter((v, i, arr) => arr.indexOf(v) === i);
+    for (const t of openTimeouts) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        dev = await CoreDAQ.open(portPath, t, 0.0);
+        openErr = null;
+        break;
+      } catch (err) {
+        openErr = err;
+        dev = null;
+        // Device may still be booting after USB open; avoid hammering immediate retries.
+        // eslint-disable-next-line no-await-in-loop
+        await sleepMs(DISCOVERY_OPEN_RETRY_SETTLE_MS);
+      }
+    }
+    if (!dev) {
+      return {
+        ok: false,
+        code: 'OPEN_FAILED',
+        error: openErr || new Error(`Failed to open ${portPath}`),
+      };
+    }
+
+    let idn = '';
+    try {
+      idn = await dev.idn();
+    } catch (_) {
+      idn = '';
+    }
+
+    if (!String(idn).toUpperCase().includes('COREDAQ')) {
+      await dev.close().catch(() => {});
+      return {
+        ok: false,
+        code: 'NOT_COREDAQ',
+        error: new Error(`${portPath} is not a CoreDAQ device.`),
+      };
+    }
+
+    const major = fwMajorFromIdn(idn);
+    const baseId = deviceKeyFromIdn(idn, portPath);
+
+    if (major === 3) {
+      this.unsupportedPorts.set(portPath, {
+        device_id: baseId,
+        connected: true,
+        port: portPath,
+        idn,
+        frontend_type: 'UNKNOWN',
+        unsupported_firmware: true,
+        unsupported_reason: 'Firmware v3 is not supported. Please upgrade to firmware v4.',
+      });
+      await dev.close().catch(() => {});
+      return {
+        ok: false,
+        code: 'UNSUPPORTED_FW',
+        error: new Error('Firmware v3 is not supported. Please upgrade to firmware v4.'),
+      };
+    }
+
+    let frontendType = 'UNKNOWN';
+    try {
+      frontendType = String(dev.frontend_type() || 'UNKNOWN').toUpperCase();
+    } catch (_) {
+      frontendType = 'UNKNOWN';
+    }
+
+    const deviceId = this._makeUniqueDeviceId(baseId);
+
+    const s = {
+      device_id: deviceId,
+      port: portPath,
+      dev,
+      idn,
+      frontend_type: frontendType,
+      detector_type: CoreDAQ.DETECTOR_INGAAS,
+      wavelength_nm: null,
+      wavelength_min_nm: null,
+      wavelength_max_nm: null,
+      stream_enabled: true,
+      autogain_enabled: false,
+      fixed_freq_hz: 500,
+      default_os_idx: 6,
+      last_autogain: 0,
+      freq_hz: null,
+      os_idx: null,
+      gains: null,
+      die_temp_c: null,
+      room_temp_c: null,
+      room_humidity_pct: null,
+      busy: false,
+      stream_error_streak: 0,
+      last_status_poll_ts: 0,
+    };
+
+    try {
+      s.detector_type = normalizeDetectorType(dev.detector_type());
+    } catch (_) {
+      s.detector_type = detectDetectorTypeFromIdn(idn);
+    }
+
+    try {
+      dev.set_detector_type(s.detector_type);
+    } catch (_) {
+      // ignore
+    }
+
+    try {
+      const lim = dev.get_wavelength_limits_nm(s.detector_type);
+      s.wavelength_min_nm = Number(lim[0]);
+      s.wavelength_max_nm = Number(lim[1]);
+    } catch (_) {
+      const [lo, hi] = fallbackWavelengthLimits(s.detector_type);
+      s.wavelength_min_nm = lo;
+      s.wavelength_max_nm = hi;
+    }
+
+    const defaultWl = defaultWavelengthNm(s.detector_type);
+    try {
+      dev.set_wavelength_nm(defaultWl);
+    } catch (_) {
+      // ignore
+    }
+    try {
+      s.wavelength_nm = Number(dev.get_wavelength_nm());
+    } catch (_) {
+      s.wavelength_nm = defaultWl;
+    }
+
+    if (s.frontend_type === CoreDAQ.FRONTEND_LOG) {
+      s.autogain_enabled = false;
+    }
+
+    try {
+      await dev.set_freq(s.fixed_freq_hz);
+      await dev.set_oversampling(s.default_os_idx);
+    } catch (_) {
+      // ignore
+    }
+
+    this.devices.set(deviceId, s);
+    this.portToDevice.set(portPath, deviceId);
+    this.unsupportedPorts.delete(portPath);
+
+    return { ok: true, reused: false, deviceId };
+  }
+
   async discoverDevices(force = false) {
     if (this.discoveryInFlight) return;
     const now = Date.now();
@@ -392,17 +807,7 @@ class CoreDAQBackend {
     this.discoveryInFlight = true;
 
     try {
-      let candidatePorts = [];
-      if (this.portOverride) {
-        candidatePorts = [this.portOverride];
-      } else {
-        try {
-          candidatePorts = await CoreDAQ.find(115200, this.timeoutS);
-        } catch (err) {
-          console.warn('[coredaq-service] discover failed:', err?.message || err);
-          candidatePorts = [];
-        }
-      }
+      const candidatePorts = await this._discoverCandidatePorts();
 
       const present = new Set(candidatePorts);
 
@@ -410,144 +815,34 @@ class CoreDAQBackend {
         if (!present.has(port)) {
           // eslint-disable-next-line no-await-in-loop
           await this._dropSession(deviceId);
+          this.portRetryAtMs.delete(port);
         }
       }
 
       for (const port of [...this.unsupportedPorts.keys()]) {
         if (!present.has(port)) {
           this.unsupportedPorts.delete(port);
+          this.portRetryAtMs.delete(port);
         }
       }
 
       for (const port of candidatePorts) {
+        if (this.devices.size >= MAX_CONNECTED_DEVICES) break;
         if (this.portToDevice.has(port)) continue;
+        const retryAt = Number(this.portRetryAtMs.get(port) || 0);
+        if (!force && retryAt > Date.now()) continue;
 
-        let dev = null;
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          dev = await CoreDAQ.open(port, this.timeoutS, 0.0);
-        } catch (_) {
-          dev = null;
-        }
-        if (!dev) continue;
-
-        let idn = '';
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          idn = await dev.idn();
-        } catch (_) {
-          idn = '';
-        }
-
-        if (!String(idn).toUpperCase().includes('COREDAQ')) {
-          // eslint-disable-next-line no-await-in-loop
-          await dev.close().catch(() => {});
+        // eslint-disable-next-line no-await-in-loop
+        const result = await this._connectPort(port);
+        if (!result.ok) {
+          if (result.code !== 'MAX_DEVICES' && result.error) {
+            console.warn(`[coredaq-service] connect failed for ${port}:`, result.error?.message || result.error);
+          }
+          this.portRetryAtMs.set(port, Date.now() + DISCOVERY_OPEN_RETRY_BACKOFF_MS);
+          if (result.code === 'MAX_DEVICES') break;
           continue;
         }
-
-        const major = fwMajorFromIdn(idn);
-        const baseId = deviceKeyFromIdn(idn, port);
-
-        if (major === 3) {
-          this.unsupportedPorts.set(port, {
-            device_id: baseId,
-            connected: true,
-            port,
-            idn,
-            frontend_type: 'UNKNOWN',
-            unsupported_firmware: true,
-            unsupported_reason: 'Firmware v3 is not supported. Please upgrade to firmware v4.',
-          });
-          // eslint-disable-next-line no-await-in-loop
-          await dev.close().catch(() => {});
-          continue;
-        }
-
-        let frontendType = 'UNKNOWN';
-        try {
-          frontendType = String(dev.frontend_type() || 'UNKNOWN').toUpperCase();
-        } catch (_) {
-          frontendType = 'UNKNOWN';
-        }
-
-        const deviceId = this._makeUniqueDeviceId(baseId);
-
-        const s = {
-          device_id: deviceId,
-          port,
-          dev,
-          idn,
-          frontend_type: frontendType,
-          detector_type: CoreDAQ.DETECTOR_INGAAS,
-          wavelength_nm: null,
-          wavelength_min_nm: null,
-          wavelength_max_nm: null,
-          stream_enabled: true,
-          autogain_enabled: false,
-          fixed_freq_hz: 500,
-          default_os_idx: 6,
-          last_autogain: 0,
-          freq_hz: null,
-          os_idx: null,
-          gains: null,
-          die_temp_c: null,
-          room_temp_c: null,
-          room_humidity_pct: null,
-          busy: false,
-          stream_error_streak: 0,
-          last_status_poll_ts: 0,
-        };
-
-        try {
-          s.detector_type = normalizeDetectorType(dev.detector_type());
-        } catch (_) {
-          s.detector_type = detectDetectorTypeFromIdn(idn);
-        }
-
-        try {
-          dev.set_detector_type(s.detector_type);
-        } catch (_) {
-          // ignore
-        }
-
-        try {
-          const lim = dev.get_wavelength_limits_nm(s.detector_type);
-          s.wavelength_min_nm = Number(lim[0]);
-          s.wavelength_max_nm = Number(lim[1]);
-        } catch (_) {
-          const [lo, hi] = fallbackWavelengthLimits(s.detector_type);
-          s.wavelength_min_nm = lo;
-          s.wavelength_max_nm = hi;
-        }
-
-        const defaultWl = defaultWavelengthNm(s.detector_type);
-        try {
-          dev.set_wavelength_nm(defaultWl);
-        } catch (_) {
-          // ignore
-        }
-        try {
-          s.wavelength_nm = Number(dev.get_wavelength_nm());
-        } catch (_) {
-          s.wavelength_nm = defaultWl;
-        }
-
-        if (s.frontend_type === CoreDAQ.FRONTEND_LOG) {
-          s.autogain_enabled = false;
-        }
-
-        try {
-          // eslint-disable-next-line no-await-in-loop
-          await dev.set_freq(s.fixed_freq_hz);
-          // eslint-disable-next-line no-await-in-loop
-          await dev.set_oversampling(s.default_os_idx);
-        } catch (_) {
-          // ignore
-        }
-
-        this.devices.set(deviceId, s);
-        this.portToDevice.set(port, deviceId);
-        this.unsupportedPorts.delete(port);
+        this.portRetryAtMs.delete(port);
       }
 
       if (!this.activeDeviceId || !this.devices.has(this.activeDeviceId)) {
@@ -702,6 +997,7 @@ class CoreDAQBackend {
           device_count: this.devices.size,
           devices: deviceRows,
           active_device_id: this.activeDeviceId,
+          port_override: this.portOverride,
 
           port: active ? active.port : null,
           idn: active ? active.idn : null,
@@ -823,7 +1119,25 @@ class CoreDAQBackend {
     const timeoutMs = Math.max(500, Math.trunc(Number(opts.timeout_ms ?? 5000)));
     const deadlineMs = Date.now() + timeoutMs;
     const debug = [];
-    const resources = this.visa.listResources();
+    const health = await withTimeout(
+      this.visa.health(),
+      Math.max(1200, Math.min(3500, timeoutMs - 200)),
+      'GPIB_SCAN_HEALTH_TIMEOUT',
+    );
+    if (!health.enabled) {
+      const errCode = String(health?.error?.code || 'VISA_UNAVAILABLE');
+      const errMsg = String(health?.error?.message || 'VISA backend not ready');
+      const checked = Array.isArray(health?.checkedPaths) && health.checkedPaths.length > 0
+        ? ` Checked paths: ${health.checkedPaths.join(', ')}.`
+        : '';
+      throw new Error(`VISA unavailable (${errCode}): ${errMsg}.${checked}`);
+    }
+    const listBudgetMs = Math.max(800, deadlineMs - Date.now() - 200);
+    const resources = await withTimeout(
+      this.visa.listResources(),
+      listBudgetMs,
+      'GPIB_SCAN_LIST_TIMEOUT',
+    );
     debug.push(`visa resources=${resources.length}`);
     debug.push(`scan timeout=${timeoutMs}ms`);
 
@@ -840,17 +1154,22 @@ class CoreDAQBackend {
       let model = null;
       try {
         // eslint-disable-next-line no-await-in-loop
-        const ioTimeoutMs = Math.max(250, Math.min(1000, remainingMs - 100));
+        const ioTimeoutMs = Math.max(500, Math.min(2500, remainingMs - 100));
         const transport = this.visa.open(resource, ioTimeoutMs);
         try {
           // eslint-disable-next-line no-await-in-loop
-          idn = await transport.query('*IDN?', 2048);
+          idn = await withTimeout(
+            transport.query('*IDN?', 2048),
+            Math.max(400, Math.min(ioTimeoutMs + 1200, remainingMs - 50)),
+            'GPIB_SCAN_QUERY_TIMEOUT',
+          );
           model = detectLaserModel(idn);
         } finally {
           // eslint-disable-next-line no-await-in-loop
-          await transport.close();
+          await withTimeout(transport.close(), 1000, 'GPIB_SCAN_CLOSE_TIMEOUT').catch(() => {});
         }
-      } catch (_) {
+      } catch (err) {
+        debug.push(`${resource} probe failed: ${String(err?.code || err?.message || err)}`);
         idn = null;
         model = null;
       }
@@ -858,7 +1177,7 @@ class CoreDAQBackend {
         resource,
         idn,
         model,
-        backend: 'visa-addon',
+        backend: 'visa-service',
       });
     }
 
@@ -882,7 +1201,7 @@ class CoreDAQBackend {
       const model = (c.toUpperCase() === '*IDN?' || c.toUpperCase() === 'IDN?') ? detectLaserModel(reply) : null;
       return {
         resource: res,
-        backend: 'visa-addon',
+        backend: 'visa-service',
         command: c,
         reply,
         model,
@@ -1014,11 +1333,17 @@ class CoreDAQBackend {
 
         this.captureMessage = 'Waiting for laser trigger and acquisition';
         await laser.startSweep();
-        await sleepMs(Math.round((samplesTotal / sampleRate + SWEEP_TRANSFER_OVERHEAD_S) * 1000));
-        try {
-          await laser.stopSweep();
-        } catch (_) {
-          // ignore stop errors
+        await sleepMs(Math.round((samplesTotal / sampleRate + SWEEP_POST_START_SETTLE_S) * 1000));
+
+        this.captureMessage = 'Verifying laser sweep completion';
+        const sweepState = await laser.waitForSweepComplete({
+          timeoutMs: Math.round(SWEEP_FINISH_POLL_TIMEOUT_S * 1000),
+          pollIntervalMs: SWEEP_FINISH_POLL_INTERVAL_MS,
+        });
+        if (sweepState.known && sweepState.running) {
+          throw new Error(
+            `Laser sweep did not finish in time (status=${String(sweepState.raw || 'running')}).`,
+          );
         }
       } catch (err) {
         const msg = String(err?.message || err);
@@ -1172,12 +1497,104 @@ class CoreDAQBackend {
   async _handleControl(ws, data) {
     const action = data.action;
     const requestedId = String(data.device_id || '').trim() || null;
+    const requestedSlot = Number.isFinite(Number(data.slot)) ? Math.trunc(Number(data.slot)) : null;
 
     try {
       if (action === 'set_active_device') {
         const did = String(data.device_id || '').trim();
         this._setActiveDevice(did);
         ws.send(JSON.stringify({ type: 'control', action, ok: true, error: null, active_device_id: this.activeDeviceId }));
+        return;
+      }
+
+      if (action === 'serial_ports_list') {
+        const ports = await this._listSerialPorts();
+        ws.send(JSON.stringify({
+          type: 'control',
+          action,
+          ok: true,
+          error: null,
+          ports,
+          debug: this.lastSerialPortDebug,
+          port_override: this.portOverride,
+        }));
+        return;
+      }
+
+      if (action === 'set_port_override') {
+        const nextPort = String(data.port || '').trim();
+        this.portOverride = nextPort || null;
+        await this.discoverDevices(true);
+        if (!this.activeDeviceId || !this.devices.has(this.activeDeviceId)) {
+          this.activeDeviceId = this._pickDefaultActive();
+        }
+        ws.send(JSON.stringify({
+          type: 'control',
+          action,
+          ok: true,
+          error: null,
+          port_override: this.portOverride,
+          active_device_id: this.activeDeviceId,
+          device_count: this.devices.size,
+        }));
+        return;
+      }
+
+      if (action === 'connect_port') {
+        const port = String(data.port || '').trim();
+        if (!port) throw new Error('No COM port selected.');
+        const slot = Number.isFinite(Number(data.slot)) ? Math.trunc(Number(data.slot)) : null;
+        const connectStartMs = Date.now();
+        const result = await withTimeout(
+          this._connectPort(port, { probeTimeoutMs: MANUAL_CONNECT_PROBE_TIMEOUT_MS }),
+          15000,
+          'CONNECT_PORT_TIMEOUT',
+        );
+        if (!result.ok) throw result.error;
+        this.manualTargetPorts.add(port);
+        if (!this.activeDeviceId || !this.devices.has(this.activeDeviceId)) {
+          this.activeDeviceId = this._pickDefaultActive();
+        }
+        ws.send(JSON.stringify({
+          type: 'control',
+          action,
+          ok: true,
+          error: null,
+          port,
+          slot,
+          device_id: result.deviceId,
+          reused: !!result.reused,
+          elapsed_ms: Date.now() - connectStartMs,
+          device_count: this.devices.size,
+        }));
+        return;
+      }
+
+      if (action === 'disconnect_port') {
+        const port = String(data.port || '').trim();
+        if (!port) throw new Error('No COM port selected.');
+        const slot = Number.isFinite(Number(data.slot)) ? Math.trunc(Number(data.slot)) : null;
+        this.manualTargetPorts.delete(port);
+        const deviceId = this.portToDevice.get(port);
+        if (deviceId) {
+          await this._dropSession(deviceId);
+        }
+        this.unsupportedPorts.delete(port);
+        this.portRetryAtMs.delete(port);
+        if (!this.activeDeviceId || !this.devices.has(this.activeDeviceId)) {
+          this.activeDeviceId = this._pickDefaultActive();
+        }
+        ws.send(JSON.stringify({
+          type: 'control',
+          action,
+          ok: true,
+          error: null,
+          port,
+          slot,
+          disconnected: !!deviceId,
+          device_count: this.devices.size,
+          active_device_id: this.activeDeviceId,
+        }));
         return;
       }
 
@@ -1310,7 +1727,7 @@ class CoreDAQBackend {
           error: null,
           resources: out.rows,
           debug: out.debug,
-          backend: 'visa-addon',
+          backend: 'visa-service',
           node_exe: process.execPath,
         }));
         return;
@@ -1320,7 +1737,31 @@ class CoreDAQBackend {
         const resource = String(data.resource || '').trim();
         if (!resource) throw new Error('No GPIB resource provided');
         this.gpibResource = resource;
-        ws.send(JSON.stringify({ type: 'control', action, ok: true, error: null, resource, backend: 'visa-addon' }));
+        let idn = null;
+        let model = null;
+        let detectError = null;
+        try {
+          const out = await this._gpibQuery(resource, '*IDN?');
+          idn = String(out.reply || '').trim() || null;
+          model = out.model || null;
+          this.gpibIdn = idn;
+          this.gpibModel = model;
+        } catch (err) {
+          detectError = String(err?.message || err);
+          this.gpibIdn = null;
+          this.gpibModel = null;
+        }
+        ws.send(JSON.stringify({
+          type: 'control',
+          action,
+          ok: true,
+          error: null,
+          resource,
+          idn,
+          model,
+          detect_error: detectError,
+          backend: 'visa-service',
+        }));
         return;
       }
 
@@ -1366,7 +1807,9 @@ class CoreDAQBackend {
         action,
         ok: false,
         error: String(err?.message || err),
+        error_code: String(err?.code || ''),
         device_id: requestedId,
+        slot: requestedSlot,
       }));
     }
   }
@@ -1398,6 +1841,16 @@ async function main() {
   });
 
   const wss = new WebSocketServer({ host: WS_HOST, port: args.wsPort });
+  wss.on('error', (err) => {
+    const code = String(err?.code || '');
+    if (code === 'EADDRINUSE') {
+      console.warn(`[coredaq-service-js] ws://${WS_HOST}:${args.wsPort} already in use; another backend is running.`);
+      backend.close().finally(() => process.exit(0));
+      return;
+    }
+    console.error('[coredaq-service-js] websocket server error:', err);
+    backend.close().finally(() => process.exit(1));
+  });
   console.log(`[coredaq-service-js] websocket listening on ws://${WS_HOST}:${args.wsPort}`);
   backend.discoverDevices(true).catch((err) => {
     console.warn('[coredaq-service-js] initial discover failed:', err?.message || err);

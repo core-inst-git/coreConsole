@@ -140,12 +140,13 @@ class VisaServiceClient {
       const env = {
         ...process.env,
         VISA_SERVICE_LOG: this._serviceLogPath(),
+        ELECTRON_RUN_AS_NODE: '1',
       };
       if (fs.existsSync(addonPath)) {
         env.VISA_ADDON_PATH = addonPath;
       }
 
-      const child = spawn(process.execPath, ['--run-as-node', script], {
+      const child = spawn(process.execPath, [script], {
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
         env,

@@ -72,6 +72,67 @@ class BaseTSL {
     await this.write('WAV:SWE 0');
   }
 
+  _parseSweepState(raw) {
+    const txt = String(raw || '').trim();
+    if (!txt) return null;
+
+    const upper = txt.toUpperCase();
+    const num = Number(txt);
+    if (Number.isFinite(num)) {
+      if (num <= 0) return { known: true, running: false, raw: txt };
+      return { known: true, running: true, raw: txt };
+    }
+
+    if (upper.includes('STOP') || upper.includes('OFF') || upper.includes('IDLE') || upper.includes('READY')) {
+      return { known: true, running: false, raw: txt };
+    }
+    if (upper.includes('RUN') || upper.includes('SWEEP') || upper.includes('BUSY') || upper.includes('PAUS')) {
+      return { known: true, running: true, raw: txt };
+    }
+
+    return null;
+  }
+
+  async getSweepState() {
+    const queries = [
+      ':WAV:SWE?',
+      'WAV:SWE?',
+      ':WAV:SWE:STAT?',
+      'WAV:SWE:STAT?',
+    ];
+
+    for (const cmd of queries) {
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const raw = await this.query(cmd);
+        const parsed = this._parseSweepState(raw);
+        if (parsed) return { ...parsed, command: cmd };
+      } catch (_) {
+        // try next command variant
+      }
+    }
+
+    return { known: false, running: null, raw: null, command: null };
+  }
+
+  async waitForSweepComplete({ timeoutMs = 10000, pollIntervalMs = 300 } = {}) {
+    const deadline = Date.now() + Math.max(200, Math.round(Number(timeoutMs) || 10000));
+    const pollMs = Math.max(50, Math.round(Number(pollIntervalMs) || 300));
+    let last = { known: false, running: null, raw: null, command: null };
+
+    while (Date.now() < deadline) {
+      // eslint-disable-next-line no-await-in-loop
+      last = await this.getSweepState();
+      if (last.known && last.running === false) {
+        return { complete: true, ...last };
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+
+    return { complete: false, ...last };
+  }
+
   async close() {
     if (typeof this.transport.close === 'function') {
       await this.transport.close();
@@ -117,15 +178,12 @@ class TSL770 extends BaseTSL {
   }
 
   async _configureSweepAxis(startNm, stopNm, speedNmS) {
-    const startM = Number(startNm) * 1e-9;
-    const stopM = Number(stopNm) * 1e-9;
-    const speedMS = Number(speedNmS) * 1e-9;
-
-    await this.write(':WAV:UNIT 1');
-    await this.write(`:WAV:SWE:SPE ${formatNumber(speedMS)}`);
-    await this.write(`:WAV ${formatNumber(startM)}`);
-    await this.write(`:WAV:SWE:STAR ${formatNumber(startM)}`);
-    await this.write(`:WAV:SWE:STOP ${formatNumber(stopM)}`);
+    // Use wavelength units in nm across TSL550/570/770 for a consistent host-side sweep pipeline.
+    await this.write(':WAV:UNIT 0');
+    await this.write(`:WAV:SWE:SPE ${formatNumber(speedNmS)}`);
+    await this.write(`:WAV ${formatNumber(startNm)}`);
+    await this.write(`:WAV:SWE:STAR ${formatNumber(startNm)}`);
+    await this.write(`:WAV:SWE:STOP ${formatNumber(stopNm)}`);
   }
 }
 

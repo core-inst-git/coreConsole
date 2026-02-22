@@ -3,9 +3,8 @@ import LivePlot from './tabs/LivePlot/LivePlot';
 import ConsoleTab from './tabs/Console/ConsoleTab';
 import CalibrationTab from './tabs/Calibration/CalibrationTab';
 import CaptureTab from './tabs/Capture/CaptureTab';
-import { DeviceStatus, sendControl, subscribeStatus } from './coredaqClient';
+import { DeviceStatus, sendControl, subscribeControl, subscribeStatus } from './coredaqClient';
 import { VirtualChannelDef, VirtualMathType } from './virtualChannels';
-import picMark from '../../image.png';
 
 const tabs = [
   { id: 'live', label: 'Power Monitor' },
@@ -13,8 +12,15 @@ const tabs = [
   { id: 'cal', label: 'Calibration' },
   { id: 'console', label: 'Console' },
 ];
+const MAX_DEVICE_SLOTS = 2;
 const VIRTUAL_CHANNELS_STORAGE_KEY = 'coredaq.virtual_channels.v1';
 const VIRTUAL_CHANNEL_COLORS = ['#C792EA', '#82AAFF', '#F78C6C', '#A3BE8C', '#FFD166', '#6EE7B7'];
+
+type ConnectSlot = {
+  id: string;
+  port: string;
+  busy: boolean;
+};
 
 function firmwareVersionFromIdn(idn?: string | null): string {
   if (!idn) return 'Unknown';
@@ -71,6 +77,18 @@ function loadVirtualChannels(): VirtualChannelDef[] {
   }
 }
 
+function sortComPorts(ports: string[]): string[] {
+  const uniq = [...new Set(ports.map((p) => String(p || '').trim()).filter(Boolean))];
+  return uniq.sort((a, b) => {
+    const am = /^COM(\d+)$/i.exec(a);
+    const bm = /^COM(\d+)$/i.exec(b);
+    if (am && bm) return Number(am[1]) - Number(bm[1]);
+    if (am) return -1;
+    if (bm) return 1;
+    return a.localeCompare(b);
+  });
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('live');
   const [showPrefs, setShowPrefs] = useState(false);
@@ -79,11 +97,24 @@ export default function App() {
   const [devices, setDevices] = useState<DeviceStatus[]>([]);
   const [activeDeviceId, setActiveDeviceId] = useState<string | null>(null);
   const [infoDeviceId, setInfoDeviceId] = useState<string | null>(null);
+  const [comPorts, setComPorts] = useState<string[]>([]);
+  const [connectSlots, setConnectSlots] = useState<ConnectSlot[]>([{ id: 'slot-1', port: '', busy: false }]);
   const [virtualChannels, setVirtualChannels] = useState<VirtualChannelDef[]>(() => loadVirtualChannels());
   const unsupportedPopupShown = useRef(false);
+  const requestedPortList = useRef(false);
+  const nextSlotId = useRef(2);
+  const slotBusyTimers = useRef<Record<number, number>>({});
   const sortedDevices = useMemo(
     () => [...devices].sort((a, b) => a.device_id.localeCompare(b.device_id)),
     [devices]
+  );
+  const connectedPorts = useMemo(
+    () => devices.map((d) => String(d.port || '').trim()).filter(Boolean),
+    [devices]
+  );
+  const visibleComPorts = useMemo(
+    () => sortComPorts([...comPorts, ...connectSlots.map((s) => s.port), ...connectedPorts]),
+    [comPorts, connectSlots, connectedPorts]
   );
 
   const activeDevice = useMemo(() => {
@@ -111,8 +142,90 @@ export default function App() {
     sendControl({ action: 'set_active_device', device_id: deviceId });
   };
 
+  const refreshComPorts = async () => {
+    try {
+      if (window.coredaq?.listSerialPorts) {
+        const out = await window.coredaq.listSerialPorts();
+        const ports = Array.isArray(out?.ports)
+          ? out.ports.map((p) => String(p || '').trim()).filter(Boolean)
+          : [];
+        setComPorts(sortComPorts(ports));
+        if (ports.length > 0) {
+          return;
+        }
+      }
+    } catch (_) {
+      // fall through to backend ws control path
+    }
+    sendControl({ action: 'serial_ports_list' });
+  };
+
+  const setConnectSlotBusy = (slotIdx: number, busy: boolean) => {
+    setConnectSlots((prev) => prev.map((slot, idx) => (idx === slotIdx ? { ...slot, busy } : slot)));
+  };
+
+  const setConnectSlotPort = (slotIdx: number, nextPort: string) => {
+    setConnectSlots((prev) => prev.map((slot, idx) => (idx === slotIdx ? { ...slot, port: nextPort } : slot)));
+  };
+
+  const clearConnectSlotTimer = (slotIdx: number) => {
+    const timer = slotBusyTimers.current[slotIdx];
+    if (timer) {
+      window.clearTimeout(timer);
+      delete slotBusyTimers.current[slotIdx];
+    }
+  };
+
+  const armConnectSlotTimer = (slotIdx: number, action: 'connect' | 'disconnect', port: string) => {
+    clearConnectSlotTimer(slotIdx);
+    slotBusyTimers.current[slotIdx] = window.setTimeout(() => {
+      setConnectSlotBusy(slotIdx, false);
+      const verb = action === 'connect' ? 'connect to' : 'disconnect';
+      window.alert(`Backend did not respond in time while trying to ${verb} ${port}.`);
+      delete slotBusyTimers.current[slotIdx];
+    }, 15000);
+  };
+
+  const addConnectSlot = () => {
+    setConnectSlots((prev) => {
+      if (prev.length >= MAX_DEVICE_SLOTS) return prev;
+      const id = `slot-${nextSlotId.current++}`;
+      return [...prev, { id, port: '', busy: false }];
+    });
+  };
+
+  const removeConnectSlot = (slotIdx: number) => {
+    setConnectSlots((prev) => {
+      if (prev.length <= 1) return prev;
+      return prev.filter((_, idx) => idx !== slotIdx);
+    });
+  };
+
+  const connectSlot = (slotIdx: number) => {
+    const port = String(connectSlots[slotIdx]?.port || '').trim();
+    if (!port) {
+      window.alert('Select a COM port first.');
+      return;
+    }
+    setConnectSlotBusy(slotIdx, true);
+    armConnectSlotTimer(slotIdx, 'connect', port);
+    sendControl({ action: 'connect_port', slot: slotIdx, port });
+  };
+
+  const disconnectSlot = (slotIdx: number) => {
+    const port = String(connectSlots[slotIdx]?.port || '').trim();
+    if (!port) {
+      window.alert('Select a COM port first.');
+      return;
+    }
+    setConnectSlotBusy(slotIdx, true);
+    armConnectSlotTimer(slotIdx, 'disconnect', port);
+    sendControl({ action: 'disconnect_port', slot: slotIdx, port });
+  };
+
   useEffect(() => {
     let alive = true;
+    let retryTimer = 0;
     const unsub = subscribeStatus((s) => {
       const rows = Array.isArray(s.devices) ? s.devices : [];
       const unsupported = rows.find((r) => r?.unsupported_firmware);
@@ -141,14 +254,93 @@ export default function App() {
         if (prev && nextDevices.some((d) => d.device_id === prev)) return prev;
         return nextDevices[0]?.device_id ?? null;
       });
+      setConnectSlots((prev) => {
+        let next = prev.map((slot) => ({ ...slot, busy: false }));
+        for (const d of nextDevices) {
+          const port = String(d.port || '').trim();
+          if (!port) continue;
+          const exists = next.some((slot) => String(slot.port || '').trim().toUpperCase() === port.toUpperCase());
+          if (!exists && next.length < MAX_DEVICE_SLOTS) {
+            next = [...next, { id: `slot-${nextSlotId.current++}`, port, busy: false }];
+          }
+        }
+        return next;
+      });
+      for (const k of Object.keys(slotBusyTimers.current)) {
+        const slotIdx = Number(k);
+        if (Number.isFinite(slotIdx)) clearConnectSlotTimer(slotIdx);
+      }
+
+      if (!requestedPortList.current) {
+        requestedPortList.current = true;
+        void refreshComPorts();
+      }
     });
 
     if (window.coredaq?.onOpenPreferences) {
       window.coredaq.onOpenPreferences(() => setShowPrefs(true));
     }
 
+    if (!requestedPortList.current) {
+      requestedPortList.current = true;
+      void refreshComPorts();
+    }
+    retryTimer = window.setTimeout(() => {
+      void refreshComPorts();
+    }, 1800);
+
     return () => {
       alive = false;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      unsub();
+    };
+  }, []);
+
+  useEffect(() => {
+    // Keep live stream traffic scoped to the Live tab.
+    sendControl({ action: 'stream', enabled: activeTab === 'live' });
+  }, [activeTab]);
+
+  useEffect(() => {
+    const unsub = subscribeControl((msg) => {
+      if (!msg || typeof msg !== 'object') return;
+
+      if (msg.action === 'serial_ports_list') {
+        if (msg.ok) {
+          const ports = Array.isArray(msg.ports)
+            ? msg.ports.map((p) => String(p || '').trim()).filter(Boolean)
+            : [];
+          setComPorts(sortComPorts(ports));
+        }
+        return;
+      }
+
+      if (msg.action === 'connect_port' || msg.action === 'disconnect_port') {
+        const slot = Number.isFinite(Number(msg.slot)) ? Math.trunc(Number(msg.slot)) : -1;
+        if (slot >= 0) {
+          clearConnectSlotTimer(slot);
+          setConnectSlotBusy(slot, false);
+        } else {
+          for (const k of Object.keys(slotBusyTimers.current)) {
+            const slotIdx = Number(k);
+            if (Number.isFinite(slotIdx)) clearConnectSlotTimer(slotIdx);
+          }
+          setConnectSlots((prev) => prev.map((entry) => ({ ...entry, busy: false })));
+        }
+        if (msg.ok) {
+          void refreshComPorts();
+          return;
+        }
+        const reason = typeof msg.error === 'string' ? msg.error : 'Failed to update device connection.';
+        window.alert(reason);
+      }
+    });
+
+    return () => {
+      for (const k of Object.keys(slotBusyTimers.current)) {
+        const slotIdx = Number(k);
+        if (Number.isFinite(slotIdx)) clearConnectSlotTimer(slotIdx);
+      }
       unsub();
     };
   }, []);
@@ -210,7 +402,7 @@ export default function App() {
         <div className="brand">
           <div className="brand-mark" />
           <div>
-            <div className="brand-title">coreDAQ</div>
+            <div className="brand-title">coreCONSOLE</div>
             <div className="brand-sub">
               <a
                 className="brand-link window-no-drag"
@@ -228,7 +420,7 @@ export default function App() {
             <span className="status-dot" />
             {connected
               ? `${devices.length} device${devices.length > 1 ? 's' : ''}${
-                  activeDevice?.port ? ` • ${activeDevice.port}` : ''
+                  activeDevice?.port ? ` - ${activeDevice.port}` : ''
                 }`
               : 'Disconnected'}
           </div>
@@ -273,7 +465,73 @@ export default function App() {
 
           <div className="device-manager">
             <div className="device-manager-head">Device Manager</div>
-            {sortedDevices.length === 0 && <div className="device-empty">Connect a CoreDAQ v4 device.</div>}
+            <div className="connect-slots-header">
+              <button
+                className="slot-add-btn"
+                onClick={addConnectSlot}
+                disabled={connectSlots.length >= MAX_DEVICE_SLOTS}
+              >
+                Add Device
+              </button>
+              <button className="com-port-refresh" onClick={refreshComPorts}>Refresh</button>
+            </div>
+            {connectSlots.map((slotEntry, slotIdx) => {
+              const selectedPort = String(slotEntry.port || '').trim();
+              const selectedPortUpper = selectedPort.toUpperCase();
+              const selectedDevice = sortedDevices.find(
+                (d) => String(d.port || '').trim().toUpperCase() === selectedPortUpper
+              );
+              const isConnectedForSlot = !!selectedDevice;
+              const isBusy = !!slotEntry.busy;
+              const buttonLabel = isBusy ? 'Working...' : isConnectedForSlot ? 'Disconnect' : 'Connect';
+              const statusLabel = isBusy
+                ? 'Working...'
+                : isConnectedForSlot
+                ? `Connected (${selectedDevice?.device_id})`
+                : 'Not connected';
+
+              return (
+                <div key={slotEntry.id} className="connect-slot">
+                  <label className="com-port-label" htmlFor={`coredaq-com-slot-${slotIdx}`}>
+                    {`Device ${slotIdx + 1} COM`}
+                  </label>
+                  <div className="com-port-row">
+                    <select
+                      id={`coredaq-com-slot-${slotIdx}`}
+                      className="com-port-select"
+                      value={selectedPort}
+                      onChange={(e) => setConnectSlotPort(slotIdx, e.target.value)}
+                    >
+                      <option value="">Select COM port</option>
+                      {visibleComPorts.map((port) => (
+                        <option key={`${slotIdx}-${port}`} value={port}>
+                          {port}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      className={`connect-slot-btn ${isConnectedForSlot ? 'disconnect' : ''}`}
+                      onClick={() => (isConnectedForSlot ? disconnectSlot(slotIdx) : connectSlot(slotIdx))}
+                      disabled={isBusy || !selectedPort}
+                    >
+                      {buttonLabel}
+                    </button>
+                    {connectSlots.length > 1 && !isConnectedForSlot && (
+                      <button
+                        className="slot-remove-btn"
+                        onClick={() => removeConnectSlot(slotIdx)}
+                        disabled={isBusy}
+                        title="Remove device slot"
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+                  <div className={`connect-slot-status ${isConnectedForSlot ? 'ok' : ''}`}>{statusLabel}</div>
+                </div>
+              );
+            })}
+            {sortedDevices.length === 0 && <div className="device-empty">Select COM port(s) and click Connect.</div>}
             {sortedDevices.map((d, idx) => {
               const isActive = activeDevice?.device_id === d.device_id;
               return (
@@ -302,10 +560,7 @@ export default function App() {
           </div>
 
           <div className="sidebar-footer">
-            <div className="pic-badge" aria-hidden="true">
-              <img src={picMark} alt="PIC" className="pic-badge-image" />
-            </div>
-            <div className="pic-caption">PIC Suite</div>
+            <div className="suite-caption">PIC Characterization Suite</div>
           </div>
         </nav>
 
@@ -315,7 +570,6 @@ export default function App() {
               windowSeconds={windowSeconds}
               devices={devices}
               activeDeviceId={activeDeviceId}
-              onSelectDevice={selectActiveDevice}
               globalStreaming={anyStreaming}
               virtualChannels={virtualChannels}
               onAddVirtualChannel={addVirtualChannel}
@@ -327,7 +581,6 @@ export default function App() {
               connected={connected}
               devices={devices}
               activeDeviceId={activeDeviceId}
-              onSelectDevice={selectActiveDevice}
               virtualChannels={virtualChannels}
               onAddVirtualChannel={addVirtualChannel}
               onRemoveVirtualChannel={removeVirtualChannel}
@@ -338,7 +591,6 @@ export default function App() {
               connected={connected}
               devices={devices}
               activeDeviceId={activeDeviceId}
-              onSelectDevice={selectActiveDevice}
             />
           )}
           {activeTab === 'cal' && (
@@ -346,7 +598,6 @@ export default function App() {
               connected={connected}
               devices={devices}
               activeDeviceId={activeDeviceId}
-              onSelectDevice={selectActiveDevice}
             />
           )}
         </main>
@@ -381,6 +632,7 @@ export default function App() {
           </div>
         </div>
       )}
+
       {infoDevice && (
         <div className="modal-backdrop" onClick={() => setInfoDeviceId(null)}>
           <div className="modal device-info-modal" onClick={(e) => e.stopPropagation()}>

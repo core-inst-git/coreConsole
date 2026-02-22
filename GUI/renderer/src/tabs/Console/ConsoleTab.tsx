@@ -7,10 +7,9 @@ type Props = {
   connected: boolean;
   devices: DeviceStatus[];
   activeDeviceId: string | null;
-  onSelectDevice: (deviceId: string) => void;
 };
 
-export default function ConsoleTab({ connected, devices, activeDeviceId, onSelectDevice }: Props) {
+export default function ConsoleTab({ connected, devices, activeDeviceId }: Props) {
   const sortedDevices = useMemo(
     () => [...devices].sort((a, b) => a.device_id.localeCompare(b.device_id)),
     [devices]
@@ -78,22 +77,7 @@ export default function ConsoleTab({ connected, devices, activeDeviceId, onSelec
         </div>
         <div className="console-target">
           <label className="capture-label">Target</label>
-          <select
-            className="capture-input console-target-select"
-            value={targetDeviceId}
-            onChange={(e) => {
-              const v = e.target.value;
-              setTargetDeviceId(v);
-              if (v) onSelectDevice(v);
-            }}
-          >
-            <option value="">Select device...</option>
-            {sortedDevices.map((d) => (
-              <option key={d.device_id} value={d.device_id}>
-                {d.device_id}
-              </option>
-            ))}
-          </select>
+          <div className="console-device">{targetDeviceId || 'No active device'}</div>
         </div>
       </div>
 

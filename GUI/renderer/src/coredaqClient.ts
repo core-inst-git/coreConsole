@@ -45,6 +45,7 @@ export type StatusMsg = {
   device_count?: number;
   devices?: DeviceStatus[];
   active_device_id?: string | null;
+  port_override?: string | null;
   port?: string | null;
   idn?: string | null;
   detector_type?: string | null;
@@ -102,6 +103,24 @@ const controlHandlers = new Set<Handler<ControlMsg>>();
 
 let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
+const pendingMessages: string[] = [];
+const MAX_PENDING_MESSAGES = 128;
+
+function enqueueMessage(raw: string) {
+  if (pendingMessages.length >= MAX_PENDING_MESSAGES) {
+    pendingMessages.shift();
+  }
+  pendingMessages.push(raw);
+}
+
+function flushPendingMessages() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  while (pendingMessages.length > 0) {
+    const msg = pendingMessages.shift();
+    if (!msg) continue;
+    ws.send(msg);
+  }
+}
 
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
@@ -109,6 +128,10 @@ function connect() {
   }
 
   ws = new WebSocket('ws://127.0.0.1:8765');
+
+  ws.onopen = () => {
+    flushPendingMessages();
+  };
 
   ws.onmessage = (ev) => {
     try {
@@ -162,12 +185,16 @@ export function subscribeConsole(h: Handler<ConsoleMsg>) {
 
 export function sendConsole(cmd: string, deviceId?: string) {
   connect();
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({
+  const payload = JSON.stringify({
     type: 'console',
     cmd,
     ...(deviceId ? { device_id: deviceId } : {}),
-  }));
+  });
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    enqueueMessage(payload);
+  } else {
+    ws.send(payload);
+  }
   consoleHandlers.forEach((h) =>
     h({ type: 'console', dir: 'tx', text: cmd, device_id: deviceId || null })
   );
@@ -175,8 +202,12 @@ export function sendConsole(cmd: string, deviceId?: string) {
 
 export function sendControl(payload: Record<string, unknown>) {
   connect();
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: 'control', ...payload }));
+  const raw = JSON.stringify({ type: 'control', ...payload });
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    enqueueMessage(raw);
+    return;
+  }
+  ws.send(raw);
 }
 
 export function subscribeControl(h: Handler<ControlMsg>) {

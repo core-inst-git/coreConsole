@@ -43,7 +43,6 @@ type Props = {
   windowSeconds: number;
   devices: DeviceStatus[];
   activeDeviceId: string | null;
-  onSelectDevice: (deviceId: string) => void;
   globalStreaming: boolean;
   virtualChannels: VirtualChannelDef[];
   onAddVirtualChannel: (input: { mathType: VirtualMathType; srcA: string; srcB: string; name: string }) => void;
@@ -81,7 +80,6 @@ export default function LivePlot({
   windowSeconds,
   devices,
   activeDeviceId,
-  onSelectDevice,
   globalStreaming,
   virtualChannels,
   onAddVirtualChannel,
@@ -395,19 +393,6 @@ export default function LivePlot({
           <div className="live-title">Power Monitor</div>
         </div>
         <div className="live-actions">
-          <select
-            className="pref-input live-device-select"
-            value={activeDevice?.device_id || ''}
-            onChange={(e) => onSelectDevice(e.target.value)}
-            disabled={sortedDevices.length === 0}
-          >
-            {sortedDevices.length === 0 && <option value="">No device</option>}
-            {sortedDevices.map((d) => (
-              <option key={d.device_id} value={d.device_id}>
-                {d.device_id} • {d.frontend_type || 'UNKNOWN'}
-              </option>
-            ))}
-          </select>
           <button className="btn ghost" onClick={() => setShowAdd(true)}>
             Add Channel
           </button>

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import CaptureMiniChart from '@/components/CaptureMiniChart';
 import { DeviceStatus, gainDisplayLabel, sendControl, subscribeControl, subscribeStatus } from '@/coredaqClient';
 import { VirtualChannelDef, VirtualMathType, parsePhysicalSourceId, physicalSourceId } from '@/virtualChannels';
@@ -7,7 +7,6 @@ type Props = {
   connected: boolean;
   devices: DeviceStatus[];
   activeDeviceId: string | null;
-  onSelectDevice: (deviceId: string) => void;
   virtualChannels: VirtualChannelDef[];
   onAddVirtualChannel: (input: { mathType: VirtualMathType; srcA: string; srcB: string; name: string }) => void;
   onRemoveVirtualChannel: (virtualId: string) => void;
@@ -58,6 +57,16 @@ const OS_IDX_MAX = 6;
 const SWEEP_PREVIEW_POINTS_DEFAULT = 120_000;
 const DEFAULT_SWEEP_MASK = 0x0f;
 
+const captureSessionCache: {
+  resources: GpibResource[];
+  selectedResource: string;
+  gpibModel: string | null;
+} = {
+  resources: [],
+  selectedResource: '',
+  gpibModel: null,
+};
+
 function tsNow(): string {
   return new Date().toLocaleTimeString();
 }
@@ -99,6 +108,59 @@ function userFacingSweepError(raw: string): string {
   return raw || 'Sweep failed.';
 }
 
+function detectLaserModelFromIdn(idnRaw: string): string | null {
+  const t = String(idnRaw || '').toUpperCase();
+  if (t.includes('TSL550') || (t.includes('SANTEC') && t.includes('550'))) return 'TSL550';
+  if (t.includes('TSL570') || (t.includes('SANTEC') && t.includes('570'))) return 'TSL570';
+  if (t.includes('TSL770') || (t.includes('SANTEC') && t.includes('770'))) return 'TSL770';
+  return null;
+}
+
+function formatFrontendLabel(frontend: string | null | undefined): string {
+  const t = String(frontend || '').toUpperCase();
+  if (t === 'LINEAR') return 'Linear';
+  if (t === 'LOG') return 'Log';
+  return 'Unknown';
+}
+
+function mergeResourceRows(prev: GpibResource[], nextRows: GpibResource[]): GpibResource[] {
+  const map = new Map<string, GpibResource>();
+  const ingest = (row: GpibResource) => {
+    const resource = String(row?.resource || '').trim();
+    if (!resource) return;
+    const prior = map.get(resource);
+    const merged: GpibResource = {
+      resource,
+      idn: row.idn ?? prior?.idn ?? null,
+      model: row.model ?? prior?.model ?? null,
+      backend: row.backend ?? prior?.backend ?? null,
+    };
+    map.set(resource, merged);
+  };
+
+  for (const row of prev || []) ingest(row);
+  for (const row of nextRows || []) ingest(row);
+
+  return [...map.values()].sort((a, b) => a.resource.localeCompare(b.resource));
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  const timeoutMs = Math.max(1, Math.round(Number(ms) || 1));
+  return new Promise<T>((resolve, reject) => {
+    const t = window.setTimeout(() => reject(new Error(`Timed out after ${timeoutMs} ms`)), timeoutMs);
+    p.then(
+      (v) => {
+        window.clearTimeout(t);
+        resolve(v);
+      },
+      (err) => {
+        window.clearTimeout(t);
+        reject(err);
+      }
+    );
+  });
+}
+
 function channelIndexFromId(id: string): number | null {
   if (id === 'ch1') return 0;
   if (id === 'ch2') return 1;
@@ -138,7 +200,6 @@ export default function CaptureTab({
   connected,
   devices,
   activeDeviceId,
-  onSelectDevice,
   virtualChannels,
   onAddVirtualChannel,
   onRemoveVirtualChannel,
@@ -153,6 +214,11 @@ export default function CaptureTab({
     () => sortedDevices.find((d) => d.device_id === selectedDeviceId) || null,
     [selectedDeviceId, sortedDevices]
   );
+  const selectedDeviceDisplay = useMemo(() => {
+    if (!selectedDevice) return 'No device selected';
+    const port = String(selectedDevice.port || '').trim() || selectedDevice.device_id;
+    return `${port} Device ${formatFrontendLabel(selectedDevice.frontend_type)}`;
+  }, [selectedDevice]);
   const selectedIsLinear = selectedDevice?.frontend_type === 'LINEAR';
   const selectedDetectorType = (selectedDevice?.detector_type || 'INGAAS').toString().toUpperCase();
 
@@ -167,21 +233,22 @@ export default function CaptureTab({
     });
   }, [activeDeviceId, sortedDevices]);
 
-  const [resources, setResources] = useState<GpibResource[]>([]);
-  const [selectedResource, setSelectedResource] = useState('');
+  const [resources, setResources] = useState<GpibResource[]>(() => captureSessionCache.resources);
+  const [selectedResource, setSelectedResource] = useState(() => captureSessionCache.selectedResource);
   const [captureState, setCaptureState] = useState('idle');
   const [captureMessage, setCaptureMessage] = useState('');
-  const [gpibModel, setGpibModel] = useState<string | null>(null);
+  const [gpibModel, setGpibModel] = useState<string | null>(() => captureSessionCache.gpibModel);
   const [gpibCmd, setGpibCmd] = useState('*IDN?');
   const [logs, setLogs] = useState<LogLine[]>([]);
 
-  const [startNm, setStartNm] = useState(1480);
-  const [stopNm, setStopNm] = useState(1620);
+  const [startNm, setStartNm] = useState(1500);
+  const [stopNm, setStopNm] = useState(1600);
   const [speedNmS, setSpeedNmS] = useState(50);
   const [powerMw, setPowerMw] = useState(1);
   const [sampleRateHz, setSampleRateHz] = useState(SAMPLE_RATE_DEFAULT);
   const [osIdx, setOsIdx] = useState(0);
   const [gains, setGains] = useState([0, 0, 0, 0]);
+  const seededDeviceIdRef = useRef<string>('');
 
   const [sweepX, setSweepX] = useState<number[]>([]);
   const [physY, setPhysY] = useState<number[][]>([[], [], [], []]); // stored in W
@@ -201,6 +268,30 @@ export default function CaptureTab({
   const [mathType, setMathType] = useState<VirtualMathType>('db');
   const [srcA, setSrcA] = useState(0);
   const [srcB, setSrcB] = useState(1);
+  const setSelectedResourceCached = useCallback((resource: string) => {
+    const value = String(resource || '').trim();
+    captureSessionCache.selectedResource = value;
+    setSelectedResource(value);
+  }, []);
+  const setGpibModelCached = useCallback((model: string | null) => {
+    const value = model && String(model).trim().length > 0 ? String(model).trim() : null;
+    captureSessionCache.gpibModel = value;
+    setGpibModel(value);
+  }, []);
+  const setResourcesSnapshot = useCallback((rows: GpibResource[]) => {
+    setResources(() => {
+      const next = mergeResourceRows([], rows);
+      captureSessionCache.resources = next;
+      return next;
+    });
+  }, []);
+  const upsertResource = useCallback((row: GpibResource) => {
+    setResources((prev) => {
+      const merged = mergeResourceRows(prev, [row]);
+      captureSessionCache.resources = merged;
+      return merged;
+    });
+  }, []);
   const maxOsIdxForRate = useMemo(() => maxOsForFreq(sampleRateHz), [sampleRateHz]);
   const selectedVirtualDefs = useMemo<ChannelDef[]>(() => {
     if (!selectedDeviceId) return [];
@@ -225,21 +316,42 @@ export default function CaptureTab({
   }, [selectedDeviceId, virtualChannels]);
 
   useEffect(() => {
-    if (!selectedDevice) return;
+    if (!selectedDevice) {
+      seededDeviceIdRef.current = '';
+      return;
+    }
+    if (seededDeviceIdRef.current === selectedDevice.device_id) {
+      return;
+    }
+    seededDeviceIdRef.current = selectedDevice.device_id;
     if (typeof selectedDevice.freq_hz === 'number') {
       setSampleRateHz(clampSampleRate(Number(selectedDevice.freq_hz)));
     }
     if (typeof selectedDevice.os_idx === 'number') setOsIdx(Number(selectedDevice.os_idx));
-    if (selectedIsLinear && Array.isArray(selectedDevice.gains) && selectedDevice.gains.length >= 4) {
+    if (
+      selectedDevice.frontend_type === 'LINEAR'
+      && Array.isArray(selectedDevice.gains)
+      && selectedDevice.gains.length >= 4
+    ) {
       setGains(selectedDevice.gains.slice(0, 4).map((v) => Number(v) || 0));
     }
-  }, [selectedDevice, selectedIsLinear]);
+  }, [selectedDevice]);
 
   useEffect(() => {
     if (osIdx > maxOsIdxForRate) {
       setOsIdx(maxOsIdxForRate);
     }
   }, [osIdx, maxOsIdxForRate]);
+
+  useEffect(() => {
+    if (!selectedResource) return;
+    if (resources.some((r) => r.resource === selectedResource)) return;
+    upsertResource({
+      resource: selectedResource,
+      model: gpibModel,
+      backend: 'visa-service',
+    });
+  }, [gpibModel, resources, selectedResource, upsertResource]);
 
   useEffect(() => {
     setActive((prev) => {
@@ -261,7 +373,10 @@ export default function CaptureTab({
     const span = Math.abs(stopNm - startNm);
     const duration = speedNmS > 0 ? span / speedNmS : 0;
     const samples = Math.max(1, Math.round(duration * sampleRateHz));
-    return { duration, samples, span };
+    const resolutionPm = speedNmS > 0 && sampleRateHz > 0
+      ? (speedNmS / sampleRateHz) * 1000.0
+      : null;
+    return { duration, samples, span, resolutionPm };
   }, [startNm, stopNm, speedNmS, sampleRateHz]);
 
   useEffect(() => {
@@ -277,22 +392,20 @@ export default function CaptureTab({
   }, [scanningVisa, addLog]);
 
   useEffect(() => {
-    if (!scanningVisa) return () => undefined;
-    const timeoutId = window.setTimeout(() => {
-      setScanningVisa(false);
-      setScanProgressPct(0);
-      addLog('GPIB scan timed out at 5 s.');
-    }, 5200);
-    return () => window.clearTimeout(timeoutId);
-  }, [scanningVisa]);
-
-  useEffect(() => {
     const unsubStatus = subscribeStatus((s) => {
       if (typeof s.gpib_resource === 'string' && s.gpib_resource.length > 0) {
-        setSelectedResource(s.gpib_resource);
+        const model = typeof s.gpib_model === 'string' && s.gpib_model.length > 0 ? s.gpib_model : null;
+        const idn = typeof s.gpib_idn === 'string' && s.gpib_idn.length > 0 ? s.gpib_idn : null;
+        setSelectedResourceCached(s.gpib_resource);
+        upsertResource({
+          resource: s.gpib_resource,
+          idn,
+          model,
+          backend: 'visa-service',
+        });
       }
       if (typeof s.gpib_model === 'string' && s.gpib_model.length > 0) {
-        setGpibModel(s.gpib_model);
+        setGpibModelCached(s.gpib_model);
       }
       setCaptureState(typeof s.capture_state === 'string' ? s.capture_state : 'idle');
       setCaptureMessage(typeof s.capture_message === 'string' ? s.capture_message : '');
@@ -307,7 +420,7 @@ export default function CaptureTab({
         window.setTimeout(() => setScanProgressPct(0), 250);
         if (msg.ok) {
           const rows = Array.isArray(msg.resources) ? (msg.resources as GpibResource[]) : [];
-          setResources(rows);
+          setResourcesSnapshot(rows);
           addLog(`GPIB scan complete: ${rows.length} resource(s)`);
           if (msg.timed_out) {
             addLog('GPIB scan reached 5 s timeout; showing partial results.');
@@ -332,10 +445,33 @@ export default function CaptureTab({
           const cmd = String(msg.command ?? '');
           const reply = String(msg.reply ?? '');
           const model = (msg.model as string | null | undefined) ?? null;
+          const resource = String(msg.resource ?? '').trim();
           addLog(`${cmd} -> ${reply}`);
-          if (model) setGpibModel(model);
+          if (model) setGpibModelCached(model);
+          if (resource) {
+            upsertResource({
+              resource,
+              idn: cmd.toUpperCase() === '*IDN?' || cmd.toUpperCase() === 'IDN?' ? reply : undefined,
+              model: cmd.toUpperCase() === '*IDN?' || cmd.toUpperCase() === 'IDN?' ? model : undefined,
+              backend: 'visa-service',
+            });
+          }
         } else {
           addLog(`GPIB query error: ${String(msg.error ?? 'Unknown')}`);
+        }
+        return;
+      }
+
+      if (msg.action === 'gpib_select') {
+        if (msg.ok) {
+          const resource = String(msg.resource ?? '').trim();
+          if (resource) {
+            const idn = typeof msg.idn === 'string' && msg.idn.length > 0 ? msg.idn : null;
+            const model = typeof msg.model === 'string' && msg.model.length > 0 ? msg.model : null;
+            setSelectedResourceCached(resource);
+            if (model) setGpibModelCached(model);
+            upsertResource({ resource, idn, model, backend: 'visa-service' });
+          }
         }
         return;
       }
@@ -410,20 +546,85 @@ export default function CaptureTab({
       unsubStatus();
       unsubControl();
     };
-  }, [runningDeviceId]);
+  }, [runningDeviceId, setGpibModelCached, setResourcesSnapshot, setSelectedResourceCached, upsertResource, addLog]);
 
-  const doScan = () => {
+  const doScan = async () => {
     if (scanningVisa) return;
     setScanningVisa(true);
     setScanProgressPct(4);
+    if (window.gpib?.listResources && window.gpib?.probeIdn) {
+      const runIpcScan = async (listTimeoutMs: number): Promise<GpibResource[]> => {
+        const health = window.gpib?.health ? await withTimeout(window.gpib.health(), 30000) : { enabled: true };
+        if (health && health.enabled === false) {
+          const reason = String((health as { reason?: string }).reason || 'VISA service unavailable');
+          throw new Error(reason);
+        }
+        const allResources = await withTimeout(window.gpib!.listResources!(), listTimeoutMs);
+        const gpibResources = allResources
+          .map((r) => String(r || '').trim())
+          .filter((r) => /^GPIB\d+::/i.test(r));
+        const resources = gpibResources.length > 0 ? gpibResources : allResources;
+        const rows: GpibResource[] = [];
+        for (const resource of resources) {
+          const res = String(resource || '').trim();
+          if (!res) continue;
+          let idn: string | null = null;
+          let model: string | null = null;
+          try {
+            const probe = await withTimeout(window.gpib!.probeIdn!(res, 1600, 2048), 3200);
+            if (probe?.ok) {
+              idn = String(probe?.data || '').trim() || null;
+              model = idn ? detectLaserModelFromIdn(idn) : null;
+            }
+          } catch {
+            // Keep scan resilient when a resource is busy/non-responsive.
+          }
+          rows.push({ resource: res, idn, model, backend: 'visa-service' });
+        }
+        return rows;
+      };
+
+      try {
+        const rows = await runIpcScan(12000);
+        setResourcesSnapshot(rows);
+        addLog(`GPIB scan complete: ${rows.length} resource(s)`);
+      } catch (err) {
+        addLog(`GPIB scan error: ${String((err as Error)?.message || err)}`);
+      } finally {
+        setScanningVisa(false);
+        setScanProgressPct(100);
+        window.setTimeout(() => setScanProgressPct(0), 250);
+      }
+      return;
+    }
     sendControl({ action: 'gpib_scan', timeout_ms: 5000 });
   };
 
-  const doQuery = () => {
+  const doQuery = async () => {
     const cmd = gpibCmd.trim();
     if (!cmd) return;
     if (!selectedResource) {
       addLog('Select a GPIB resource first.');
+      return;
+    }
+    if (window.gpib?.queryResource) {
+      try {
+        const out = await withTimeout(window.gpib.queryResource(selectedResource, cmd, 2500, 8192), 4000);
+        const reply = String((out as { data?: string } | null)?.data || '');
+        addLog(`${cmd} -> ${reply}`);
+        if (cmd.toUpperCase() === '*IDN?' || cmd.toUpperCase() === 'IDN?') {
+          const model = detectLaserModelFromIdn(reply);
+          if (model) setGpibModelCached(model);
+          upsertResource({
+            resource: selectedResource,
+            idn: reply || null,
+            model,
+            backend: 'visa-service',
+          });
+        }
+      } catch (err) {
+        addLog(`GPIB query error: ${String((err as Error)?.message || err)}`);
+      }
       return;
     }
     sendControl({ action: 'gpib_query', resource: selectedResource, cmd });
@@ -446,23 +647,13 @@ export default function CaptureTab({
       warnUser('No laser resource selected. Click Scan VISA, select a resource, then run sweep.');
       return;
     }
-    if (resources.length === 0) {
-      warnUser('No scanned laser resources. Click Scan VISA first, then select a resource.');
-      return;
-    }
     const selectedRow = resources.find((r) => r.resource === selectedResource) || null;
-    if (!selectedRow) {
-      warnUser('Selected laser resource is not currently visible. Run Scan VISA and select a valid resource.');
-      return;
+    if (selectedRow && (!selectedRow.idn || String(selectedRow.idn).trim().length === 0)) {
+      addLog('Selected resource has no cached IDN response. Backend will verify at sweep start.');
     }
-    if (!selectedRow.idn || String(selectedRow.idn).trim().length === 0) {
-      warnUser('Selected laser did not respond to *IDN?. Check GPIB cabling and resource selection.');
-      return;
-    }
-    const selectedModel = (selectedRow.model || gpibModel || '').toString().toUpperCase();
+    const selectedModel = (selectedRow?.model || gpibModel || '').toString().toUpperCase();
     if (!selectedModel) {
-      warnUser('Unsupported laser model. Supported models: TSL550, TSL570, TSL770.');
-      return;
+      addLog('Laser model not cached. Backend will detect model at sweep start.');
     }
 
     const clampedRate = clampSampleRate(sampleRateHz);
@@ -641,34 +832,10 @@ export default function CaptureTab({
         <div className="panel capture-controls-panel">
           <div className="panel-header">
             <div className="panel-title">Sweep Control</div>
-            <div className="panel-meta">
-              {selectedDevice
-                ? `${selectedDevice.device_id} • ${selectedDevice.frontend_type || 'UNKNOWN'}`
-                : 'No device selected'}
-            </div>
+            <div className="panel-meta">{selectedDeviceDisplay}</div>
           </div>
 
           <div className="capture-fields">
-            <div className="capture-field">
-              <label className="capture-label">Target Device</label>
-              <select
-                className="capture-input"
-                value={selectedDeviceId}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setSelectedDeviceId(v);
-                  if (v) onSelectDevice(v);
-                }}
-              >
-                <option value="">Select device...</option>
-                {sortedDevices.map((d) => (
-                  <option key={d.device_id} value={d.device_id}>
-                    {d.device_id} ({d.frontend_type || 'UNKNOWN'})
-                  </option>
-                ))}
-              </select>
-            </div>
-
             <div className="capture-toolbar">
               <button className="btn ghost" onClick={doScan} disabled={scanningVisa}>
                 {scanningVisa ? 'Scanning...' : 'Scan VISA'}
@@ -681,13 +848,17 @@ export default function CaptureTab({
             )}
 
             <div className="capture-field">
+              <label className="capture-label">Target Device</label>
+              <div className="capture-readonly">{selectedDeviceDisplay}</div>
+            </div>
+            <div className="capture-field">
               <label className="capture-label">Resource</label>
               <select
                 className="capture-input"
                 value={selectedResource}
                 onChange={(e) => {
                   const v = e.target.value;
-                  setSelectedResource(v);
+                  setSelectedResourceCached(v);
                   sendControl({ action: 'gpib_select', resource: v });
                 }}
               >
@@ -765,20 +936,9 @@ export default function CaptureTab({
               </div>
             </div>
 
-            <div className="capture-grid-2">
-              <div className="capture-field">
-                <label className="capture-label">Detector</label>
-                <div className="capture-readonly">{selectedDetectorType}</div>
-              </div>
-              <div className="capture-field">
-                <label className="capture-label">Wavelength (nm)</label>
-                <div className="capture-readonly">1550</div>
-                <div className="capture-hint">
-                  {selectedDetectorType === 'INGAAS'
-                    ? 'Fixed at 1550 nm for InGaAs sweep conversion.'
-                    : 'InGaAs sweeps are fixed at 1550 nm.'}
-                </div>
-              </div>
+            <div className="capture-field">
+              <label className="capture-label">Detector</label>
+              <div className="capture-readonly">{selectedDetectorType}</div>
             </div>
 
             <div className="capture-grid-2">
@@ -848,9 +1008,10 @@ export default function CaptureTab({
             </div>
 
             <div className="capture-meta">
-              {captureMessage || 'Ready'} • Span {estimate.span.toFixed(3)} nm • Duration{' '}
-              {estimate.duration.toFixed(2)} s • Est {estimate.samples.toLocaleString()} samples
-              {samplesTotal ? ` • Last ${samplesTotal.toLocaleString()} samples` : ''}
+              {captureMessage || 'Ready'} - Span {estimate.span.toFixed(3)} nm - Duration{' '}
+              {estimate.duration.toFixed(2)} s - Est {estimate.samples.toLocaleString()} samples
+              {estimate.resolutionPm != null ? ` - Resolution ${estimate.resolutionPm.toFixed(3)} pm` : ''}
+              {samplesTotal ? ` - Last ${samplesTotal.toLocaleString()} samples` : ''}
             </div>
 
             <div className="capture-log">
@@ -905,7 +1066,7 @@ export default function CaptureTab({
                     }}
                     title="Close"
                   >
-                    ×
+                    x
                   </button>
                 </div>
                 <CaptureMiniChart points={ch.points} color={ch.color} unit={ch.unit} />

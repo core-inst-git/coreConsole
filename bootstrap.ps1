@@ -33,13 +33,20 @@ Write-Host "[coreConsole] install GUI deps"
 npm --prefix GUI install
 
 Write-Host "[coreConsole] install visa-addon deps"
-npm --prefix packages/visa-addon install
+npm run visa:addon:install
 
 Write-Host "[coreConsole] install visa-service deps"
 npm --prefix packages/visa-service install
 
 Write-Host "[coreConsole] build visa-addon"
-npm --prefix packages/visa-addon run build
+try {
+  npm run visa:addon:build
+} catch {
+  Write-Host "[coreConsole] error: VISA addon native build failed."
+  Write-Host "  Ensure Python + Visual Studio C++ Build Tools are installed."
+  Write-Host "  NI-VISA/NI-488.2 are runtime prerequisites for GPIB hardware access."
+  throw
+}
 
 Write-Host "[coreConsole] check visa-service"
 npm run visa:service:check

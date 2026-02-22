@@ -2,6 +2,7 @@
   "name": "coreconsole",
   "version": "0.1.0",
   "private": true,
+  "author": "Core Instrumentation",
   "description": "coreConsole desktop app for coreDAQ",
   "engines": {
     "node": "^20.0.0",
@@ -18,15 +19,19 @@
     "build:renderer": "vite build --config renderer/vite.config.ts",
     "preview": "vite preview --config renderer/vite.config.ts",
     "pack": "npm run build:renderer && electron-builder --dir",
-    "dist": "npm run build:renderer && electron-builder",
-    "dist:mac": "npm run build:renderer && electron-builder --mac",
-    "dist:win": "npm run build:renderer && electron-builder --win",
-    "dist:win:portable": "npm run build:renderer && electron-builder --win portable --x64",
-    "dist:linux": "npm run build:renderer && electron-builder --linux",
+    "release:copy-apis": "node -e \"const fs=require('fs'); const path=require('path'); const src=path.resolve(__dirname,'..','API'); const out=path.resolve(__dirname,'release','api'); fs.mkdirSync(out,{recursive:true}); for (const f of ['coredaq_js_api.js','coredaq_python_api.py','README.md']) { const from=path.join(src,f); const to=path.join(out,f); if (fs.existsSync(from)) fs.copyFileSync(from,to); } console.log('[coreConsole] copied APIs to '+out);\"",
+    "dist": "npm run build:renderer && electron-builder && npm run release:copy-apis",
+    "dist:mac": "npm run build:renderer && electron-builder --mac && npm run release:copy-apis",
+    "dist:win": "npm run build:renderer && electron-builder --win && npm run release:copy-apis",
+    "dist:win:portable": "npm run build:renderer && electron-builder --win portable --x64 && npm run release:copy-apis",
+    "dist:win:portable:fast": "npm run build:renderer && electron-builder --win portable --x64 -c.compression=store && npm run release:copy-apis",
+    "dist:win:zip": "npm run build:renderer && electron-builder --win dir --x64 && npm run release:copy-apis && powershell -NoProfile -ExecutionPolicy Bypass -Command \"$v=(Get-Content package.json | ConvertFrom-Json).version; $zip=\\\"release/coreConsole-$v-win-unpacked.zip\\\"; if(Test-Path $zip){Remove-Item $zip -Force}; Compress-Archive -Path \\\"release/win-unpacked/*\\\" -DestinationPath $zip -Force; Write-Host \\\"Created $zip\\\"\"",
+    "dist:linux": "npm run build:renderer && electron-builder --linux && npm run release:copy-apis",
     "release:organize": "bash scripts/organize_release.sh",
     "release:all": "npm run build:renderer && npx electron-builder --mac && npx electron-builder --win --x64 && npm run release:organize"
   },
   "dependencies": {
+    "coreconsole-root": "file:..",
     "echarts": "^5.6.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
@@ -47,6 +52,7 @@
   "build": {
     "appId": "com.coreinstrumentation.coreconsole",
     "productName": "coreConsole",
+    "compression": "normal",
     "asar": true,
     "asarUnpack": [
       "**/*.node"
@@ -58,7 +64,10 @@
       "electron/**/*",
       "backend/coredaq_service.js",
       "renderer/dist/**/*",
-      "package.json"
+      "package.json",
+      "!release/**",
+      "!node_modules/coreconsole-root/**",
+      "!**/*.map"
     ],
     "extraResources": [
       {

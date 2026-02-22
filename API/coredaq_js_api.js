@@ -234,9 +234,23 @@ class CoreDAQ {
       this._lastError = err;
     });
 
-    await this._drain();
-
-    this._frontend_type = await this._detect_frontend_type_once();
+    const startupDeadlineMs = Date.now() + Math.max(2500, this._timeoutMs * 10);
+    let frontendErr = null;
+    for (;;) {
+      try {
+        await this._drain();
+        this._frontend_type = await this._detect_frontend_type_once();
+        frontendErr = null;
+        break;
+      } catch (err) {
+        frontendErr = err;
+        if (Date.now() >= startupDeadlineMs) break;
+        await sleepMs(120);
+      }
+    }
+    if (!this._frontend_type) {
+      throw frontendErr || new CoreDAQError('Failed to detect CoreDAQ front-end type during startup');
+    }
     try {
       const [stIdn, payloadIdn] = await this._ask('IDN?');
       this._idn_cache = stIdn === 'OK' ? payloadIdn : '';
