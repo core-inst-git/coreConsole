@@ -1403,9 +1403,6 @@ class CoreDAQ:
             return [(np.asarray(lst, dtype=np.float64) / 1000.0).tolist() for lst in mv]
         return [[x / 1000.0 for x in lst] for lst in mv]
 
-(self, frames: int, use_zero: Optional[bool] = None) -> List[List[float]]:
-        mv = self.transfer_frames_mV(frames, use_zero=use_zero)
-        return [[x / 1000.0 for x in lst] for lst in mv]
 
     def transfer_frames_W(
         self,
