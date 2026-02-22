@@ -182,6 +182,17 @@ class CoreDAQ {
     this._silicon_log_iz_a = CoreDAQ.DEFAULT_SILICON_LOG_IZ_A;
     this._silicon_linear_tia_ohm = CoreDAQ._build_default_tia_ohm_table();
 
+    // ---- Fast-path caches (transfer_frames_W) ----
+    this._fastLinearSlope = fill2D(CoreDAQ.NUM_HEADS, CoreDAQ.NUM_GAINS, 0.0);
+    this._fastLinearIntercept = fill2D(CoreDAQ.NUM_HEADS, CoreDAQ.NUM_GAINS, 0.0);
+    this._fastLinearPowerLsb = fill2D(CoreDAQ.NUM_HEADS, CoreDAQ.NUM_GAINS, 0.0);
+    this._fastLinearDecimals = fill2D(CoreDAQ.NUM_HEADS, CoreDAQ.NUM_GAINS, 0);
+    this._fastLinearCorr = 1.0;
+    this._fastLogCorr = 1.0;
+    this._fastLoglutV = null;
+    this._fastLoglutLog10P = null;
+    this._fastSiliconResp = 1.0;
+
     this._onData = (chunk) => {
       if (!chunk || chunk.length === 0) return;
       this._rxBuffer = Buffer.concat([this._rxBuffer, Buffer.from(chunk)]);
@@ -270,12 +281,14 @@ class CoreDAQ {
     }
 
     this._bootstrap_silicon_tia_from_linear_cal();
+    this._rebuildFastTables();
 
     const respPath = path.join(__dirname, 'responsivity_curves.json');
     if (fs.existsSync(respPath)) {
       try {
         this.load_responsivity_curves_json(respPath);
         this._bootstrap_silicon_tia_from_linear_cal();
+        this._rebuildFastTables();
       } catch (_) {
         // Keep API usable if file is malformed.
       }
@@ -562,6 +575,7 @@ class CoreDAQ {
   set_detector_type(detector) {
     this._detector_type = CoreDAQ._normalize_detector_type(detector);
     this.set_wavelength_nm(this._wavelength_nm);
+    this._rebuildFastTables();
   }
 
   _detector_wavelength_limits_nm(detector = null) {
@@ -589,6 +603,7 @@ class CoreDAQ {
       );
     }
     this._wavelength_nm = clamped;
+    this._rebuildFastTables();
   }
 
   get_wavelength_nm() {
@@ -692,6 +707,78 @@ class CoreDAQ {
     return Math.max(0.0, Number(rRef) / Number(rNow));
   }
 
+  _rebuildFastTables() {
+    try {
+      this._fastLogCorr = Number(this._ingaas_responsivity_correction_factor());
+      if (!Number.isFinite(this._fastLogCorr)) this._fastLogCorr = 1.0;
+    } catch (_) {
+      this._fastLogCorr = 1.0;
+    }
+
+    try {
+      this._fastSiliconResp = Number(this._interp_responsivity_aw(CoreDAQ.DETECTOR_SILICON, this._wavelength_nm));
+      if (!Number.isFinite(this._fastSiliconResp)) this._fastSiliconResp = 1.0;
+    } catch (_) {
+      this._fastSiliconResp = 1.0;
+    }
+
+    if (this._loglut_V_V && this._loglut_log10P) {
+      this._fastLoglutV = this._loglut_V_V;
+      this._fastLoglutLog10P = this._loglut_log10P;
+    } else {
+      this._fastLoglutV = null;
+      this._fastLoglutLog10P = null;
+    }
+
+    if (this._detector_type === CoreDAQ.DETECTOR_INGAAS) {
+      let corr = 1.0;
+      try { corr = Number(this._ingaas_responsivity_correction_factor()); } catch (_) { corr = 1.0; }
+      if (!Number.isFinite(corr)) corr = 1.0;
+      this._fastLinearCorr = corr;
+
+      for (let h = 0; h < CoreDAQ.NUM_HEADS; h += 1) {
+        for (let g = 0; g < CoreDAQ.NUM_GAINS; g += 1) {
+          const slope = Number(this._cal_slope[h][g]);
+          const intercept = Number(this._cal_intercept[h][g]);
+          this._fastLinearSlope[h][g] = slope;
+          this._fastLinearIntercept[h][g] = intercept;
+          if (!(slope !== 0.0 && Number.isFinite(slope))) {
+            this._fastLinearPowerLsb[h][g] = 0.0;
+            this._fastLinearDecimals[h][g] = 0;
+            continue;
+          }
+          let powerLsb = CoreDAQ.ADC_LSB_MV / Math.abs(slope);
+          powerLsb *= Math.max(0.0, corr);
+          this._fastLinearPowerLsb[h][g] = powerLsb;
+          this._fastLinearDecimals[h][g] = CoreDAQ._power_decimals_from_step(powerLsb);
+        }
+      }
+      return;
+    }
+
+    if (this._detector_type === CoreDAQ.DETECTOR_SILICON) {
+      const resp = Number(this._fastSiliconResp);
+      for (let h = 0; h < CoreDAQ.NUM_HEADS; h += 1) {
+        for (let g = 0; g < CoreDAQ.NUM_GAINS; g += 1) {
+          const tia = Number(this._silicon_linear_tia_ohm[h][g]);
+          this._fastLinearSlope[h][g] = 0.0;
+          this._fastLinearIntercept[h][g] = 0.0;
+          if (!(resp > 0.0) || !(tia > 0.0)) {
+            this._fastLinearPowerLsb[h][g] = 0.0;
+            this._fastLinearDecimals[h][g] = 0;
+            continue;
+          }
+          const powerLsb = CoreDAQ.ADC_LSB_VOLTS / Math.abs(tia * resp);
+          this._fastLinearPowerLsb[h][g] = powerLsb;
+          this._fastLinearDecimals[h][g] = CoreDAQ._power_decimals_from_step(powerLsb);
+        }
+      }
+      return;
+    }
+
+    this._fastLinearCorr = 1.0;
+  }
+
   _bootstrap_silicon_tia_from_linear_cal() {
     let rRef;
     try {
@@ -712,6 +799,7 @@ class CoreDAQ {
         }
       }
     }
+    this._rebuildFastTables();
   }
 
   set_silicon_linear_tia_ohm(head, gain, tia_ohm) {
@@ -721,6 +809,7 @@ class CoreDAQ {
     const val = Number(tia_ohm);
     if (!Number.isFinite(val) || !(val > 0.0)) throw new Error('tia_ohm must be > 0');
     this._silicon_linear_tia_ohm[head - 1][g] = val;
+    this._rebuildFastTables();
   }
 
   get_silicon_linear_tia_ohm(head, gain) {
@@ -737,6 +826,7 @@ class CoreDAQ {
     if (!Number.isFinite(iz) || !(iz > 0.0)) throw new Error('iz_a must be > 0');
     this._silicon_log_vy_v_per_decade = vy;
     this._silicon_log_iz_a = iz;
+    this._rebuildFastTables();
   }
 
   get_silicon_log_model() {
@@ -1587,39 +1677,135 @@ class CoreDAQ {
     }
 
     if (this._frontend_type === CoreDAQ.FRONTEND_LINEAR) {
-      const mvCh = await this.transfer_frames_mV(nFrames, null);
+      const ch = await this.transfer_frames_adc(nFrames);
       const gains = await this.get_gains();
       const powerCh = [[], [], [], []];
 
-      for (let chIdx = 0; chIdx < 4; chIdx += 1) {
-        const gain = Number(gains[chIdx]);
-        const outList = powerCh[chIdx];
-        for (const mvVal of mvCh[chIdx]) {
-          outList.push(this._convert_linear_mv_to_power_w(chIdx, gain, Number(mvVal)));
+      if (this._detector_type === CoreDAQ.DETECTOR_INGAAS) {
+        const corr = Number(this._fastLinearCorr);
+        for (let chIdx = 0; chIdx < 4; chIdx += 1) {
+          const gain = Number(gains[chIdx]);
+          const slope = Number(this._fastLinearSlope[chIdx][gain]);
+          const intercept = Number(this._fastLinearIntercept[chIdx][gain]);
+          const powerLsb = Number(this._fastLinearPowerLsb[chIdx][gain]);
+          const decimals = Number(this._fastLinearDecimals[chIdx][gain]);
+
+          if (!(slope !== 0.0)) {
+            throw new CoreDAQError(`Invalid slope for head ${chIdx + 1}, gain ${gain}`);
+          }
+
+          const codes = ch[chIdx];
+          const out = new Array(nFrames);
+          const z = Number(this._linear_zero_adc[chIdx]);
+          const mvScale = CoreDAQ.ADC_LSB_MV;
+          for (let i = 0; i < nFrames; i += 1) {
+            let mv = (Number(codes[i]) - z) * mvScale;
+            if (this._mv_zero_threshold > 0.0 && Math.abs(mv) < this._mv_zero_threshold) mv = 0.0;
+            let p = (mv - intercept) / slope;
+            if (corr !== 1.0) p *= corr;
+            if (powerLsb > 0.0) p = Math.round(p / powerLsb) * powerLsb;
+            out[i] = Number(p.toFixed(decimals));
+          }
+          powerCh[chIdx] = out;
         }
+        return powerCh;
       }
 
-      return powerCh;
+      if (this._detector_type === CoreDAQ.DETECTOR_SILICON) {
+        const resp = Number(this._fastSiliconResp);
+        for (let chIdx = 0; chIdx < 4; chIdx += 1) {
+          const gain = Number(gains[chIdx]);
+          const tia = Number(this._silicon_linear_tia_ohm[chIdx][gain]);
+          const powerLsb = Number(this._fastLinearPowerLsb[chIdx][gain]);
+          const decimals = Number(this._fastLinearDecimals[chIdx][gain]);
+
+          if (!(resp > 0.0) || !(tia > 0.0)) {
+            throw new CoreDAQError(`Invalid silicon model at head ${chIdx + 1}, gain ${gain}`);
+          }
+
+          const codes = ch[chIdx];
+          const out = new Array(nFrames);
+          const z = Number(this._linear_zero_adc[chIdx]);
+          const mvScale = CoreDAQ.ADC_LSB_MV;
+          for (let i = 0; i < nFrames; i += 1) {
+            let mv = (Number(codes[i]) - z) * mvScale;
+            if (this._mv_zero_threshold > 0.0 && Math.abs(mv) < this._mv_zero_threshold) mv = 0.0;
+            let p = (mv / 1000.0) / (tia * resp);
+            if (powerLsb > 0.0) p = Math.round(p / powerLsb) * powerLsb;
+            out[i] = Number(p.toFixed(decimals));
+          }
+          powerCh[chIdx] = out;
+        }
+        return powerCh;
+      }
+
+      throw new CoreDAQError(`Unknown detector type: ${this._detector_type}`);
     }
 
     if (this._frontend_type === CoreDAQ.FRONTEND_LOG) {
-      const vCh = await this.transfer_frames_volts(nFrames, null);
+      const ch = await this.transfer_frames_adc(nFrames);
       const db = log_deadband_mV === null ? this._log_deadband_mV : Number(log_deadband_mV);
-
       const powerCh = [[], [], [], []];
-      for (let chIdx = 0; chIdx < 4; chIdx += 1) {
-        const outList = powerCh[chIdx];
-        for (const v of vCh[chIdx]) {
-          const mvEquiv = v * 1e3;
-          if (db > 0.0 && Math.abs(mvEquiv) < db) {
-            outList.push(0.0);
-          } else {
-            const pW = this._convert_log_voltage_to_power_w(Number(v));
-            outList.push(Number(pW.toFixed(CoreDAQ.POWER_OUTPUT_DECIMALS_MAX)));
+
+      if (this._detector_type === CoreDAQ.DETECTOR_SILICON) {
+        const resp = Number(this._fastSiliconResp);
+        if (!(resp > 0.0)) throw new CoreDAQError('Invalid silicon responsivity');
+        for (let chIdx = 0; chIdx < 4; chIdx += 1) {
+          const codes = ch[chIdx];
+          const out = new Array(nFrames);
+          const mvScale = CoreDAQ.ADC_LSB_MV;
+          for (let i = 0; i < nFrames; i += 1) {
+            let mv = Number(codes[i]) * mvScale;
+            if (db > 0.0 && Math.abs(mv) < db) { out[i] = 0.0; continue; }
+            const v = mv / 1000.0;
+            const p = (this._silicon_log_iz_a / resp) * (10.0 ** (v / this._silicon_log_vy_v_per_decade));
+            out[i] = Number(p.toFixed(CoreDAQ.POWER_OUTPUT_DECIMALS_MAX));
           }
+          powerCh[chIdx] = out;
         }
+        return powerCh;
       }
-      return powerCh;
+
+      if (this._detector_type === CoreDAQ.DETECTOR_INGAAS) {
+        const xs = this._fastLoglutV;
+        const ys = this._fastLoglutLog10P;
+        if (!xs || !ys) throw new CoreDAQError('LOG LUT not loaded');
+        const corr = Number(this._fastLogCorr);
+        for (let chIdx = 0; chIdx < 4; chIdx += 1) {
+          const codes = ch[chIdx];
+          const out = new Array(nFrames);
+          const mvScale = CoreDAQ.ADC_LSB_MV;
+          for (let i = 0; i < nFrames; i += 1) {
+            let mv = Number(codes[i]) * mvScale;
+            if (db > 0.0 && Math.abs(mv) < db) { out[i] = 0.0; continue; }
+            const v = mv / 1000.0;
+            // linear interpolation of LUT
+            let j = 0;
+            if (v <= xs[0]) j = 0;
+            else if (v >= xs[xs.length - 1]) j = xs.length - 2;
+            else {
+              // binary search
+              let lo = 0; let hi = xs.length - 1;
+              while (lo < hi - 1) {
+                const mid = (lo + hi) >>> 1;
+                if (xs[mid] <= v) lo = mid; else hi = mid;
+              }
+              j = lo;
+            }
+            const x0 = xs[j]; const x1 = xs[j + 1];
+            const y0 = ys[j]; const y1 = ys[j + 1];
+            const t = x1 === x0 ? 0.0 : (v - x0) / (x1 - x0);
+            let y = y0 + t * (y1 - y0);
+            let p = 10.0 ** y;
+            if (corr !== 1.0) p *= corr;
+            out[i] = Number(p.toFixed(CoreDAQ.POWER_OUTPUT_DECIMALS_MAX));
+          }
+          powerCh[chIdx] = out;
+        }
+        return powerCh;
+      }
+
+      throw new CoreDAQError(`Unknown detector type: ${this._detector_type}`);
     }
 
     throw new CoreDAQError(`Unknown frontend type: ${this._frontend_type}`);

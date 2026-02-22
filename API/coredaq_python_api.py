@@ -12,6 +12,12 @@ from typing import Optional, Tuple, List, Union, Dict
 import warnings
 import json
 import os
+try:
+    import numpy as np
+    _HAS_NUMPY = True
+except Exception:
+    np = None
+    _HAS_NUMPY = False
 
 
 class CoreDAQError(Exception):
@@ -1346,7 +1352,29 @@ class CoreDAQ:
         ch = self.transfer_frames_adc(frames)
         lsb_mV = self.ADC_LSB_MV
 
-        # LINEAR: always subtract per-channel zero offsets (gain-independent)
+        if _HAS_NUMPY:
+            if self._frontend_type == self.FRONTEND_LINEAR:
+                out = []
+                for head_idx in range(4):
+                    z = float(self._linear_zero_adc[head_idx])
+                    codes = np.asarray(ch[head_idx], dtype=np.float64)
+                    mv = (codes - z) * lsb_mV
+                    mv = np.round(mv, self.MV_OUTPUT_DECIMALS)
+                    out.append(mv.tolist())
+                return out
+
+            if self._frontend_type == self.FRONTEND_LOG:
+                db = self._log_deadband_mV if log_deadband_mV is None else float(log_deadband_mV)
+                out = []
+                for lst in ch:
+                    codes = np.asarray(lst, dtype=np.float64)
+                    mv = np.round(codes * lsb_mV, self.MV_OUTPUT_DECIMALS)
+                    if db > 0.0:
+                        mv[np.abs(mv) < db] = 0.0
+                    out.append(mv.tolist())
+                return out
+
+        # Fallback (no NumPy)
         if self._frontend_type == self.FRONTEND_LINEAR:
             out: List[List[float]] = [[], [], [], []]
             for head_idx in range(4):
@@ -1357,7 +1385,6 @@ class CoreDAQ:
                 ]
             return out
 
-        # LOG: apply deadband in mV (does not use zeroing at all)
         if self._frontend_type == self.FRONTEND_LOG:
             db = self._log_deadband_mV if log_deadband_mV is None else float(log_deadband_mV)
             out = []
@@ -1371,6 +1398,12 @@ class CoreDAQ:
         raise CoreDAQError(f"Unknown frontend type: {self._frontend_type}")
 
     def transfer_frames_volts(self, frames: int, use_zero: Optional[bool] = None) -> List[List[float]]:
+        mv = self.transfer_frames_mV(frames, use_zero=use_zero)
+        if _HAS_NUMPY:
+            return [(np.asarray(lst, dtype=np.float64) / 1000.0).tolist() for lst in mv]
+        return [[x / 1000.0 for x in lst] for lst in mv]
+
+(self, frames: int, use_zero: Optional[bool] = None) -> List[List[float]]:
         mv = self.transfer_frames_mV(frames, use_zero=use_zero)
         return [[x / 1000.0 for x in lst] for lst in mv]
 
