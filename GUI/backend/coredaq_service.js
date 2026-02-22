@@ -1092,7 +1092,8 @@ class CoreDAQBackend {
 
   _buildSweepSeries(channelsW, startNm, stopNm, sampleRateHz, samplesTotal, previewPoints) {
     const span = Number(stopNm) - Number(startNm);
-    const durationS = samplesTotal / Number(sampleRateHz);
+    const sr = Number(sampleRateHz);
+    const durationS = (samplesTotal > 1 && sr > 0) ? ((samplesTotal - 1) / sr) : 1.0;
     const idx = decimateIndices(samplesTotal, previewPoints);
     const xPreview = idx.map((i) => {
       const t = i / Number(sampleRateHz);

@@ -616,6 +616,7 @@ class CoreDAQ {
       throw new Error('responsivity reference wavelength must be > 0');
     }
     this._responsivity_ref_nm = wl;
+    this._rebuildFastTables();
   }
 
   get_responsivity_reference_nm() {

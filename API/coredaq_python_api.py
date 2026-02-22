@@ -354,6 +354,7 @@ class CoreDAQ:
         if not math.isfinite(wl) or wl <= 0.0:
             raise ValueError("responsivity reference wavelength must be > 0")
         self._responsivity_ref_nm = wl
+        self._rebuild_fast_tables()
 
     def get_responsivity_reference_nm(self) -> float:
         return float(self._responsivity_ref_nm)
