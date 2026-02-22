@@ -72,6 +72,15 @@ class BaseTSL {
     await this.write('WAV:SWE 0');
   }
 
+  async setWavelengthNm(wavelengthNm) {
+    const wl = Number(wavelengthNm);
+    if (!Number.isFinite(wl) || wl <= 0) {
+      throw new Error("Invalid wavelength: ");
+    }
+    await this.write(':WAV:UNIT 0');
+    await this.write(`:WAV `);
+  }
+
   _parseSweepState(raw) {
     const txt = String(raw || '').trim();
     if (!txt) return null;
