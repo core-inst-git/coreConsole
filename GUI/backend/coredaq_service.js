@@ -1211,6 +1211,56 @@ class CoreDAQBackend {
       await transport.close();
     }
   }
+  async _returnLaserToWavelength(transport, wavelengthNm) {
+    const wl = Number(wavelengthNm);
+    if (!Number.isFinite(wl) || wl <= 0) return { ok: false, reason: 'invalid_wavelength' };
+
+    const wlText = wl.toFixed(4).replace(/\.?0+$/, '');
+    const commandPlans = [
+      [':SOUR:WAV ' + wlText],
+      [':SOUR:WAV ' + wlText + 'NM'],
+      [':SOURCE:WAVELENGTH ' + wlText],
+      [':SOURCE:WAVELENGTH ' + wlText + 'NM'],
+    ];
+
+    const errors = [];
+    for (const plan of commandPlans) {
+      try {
+        for (const cmd of plan) {
+          // eslint-disable-next-line no-await-in-loop
+          await transport.write(cmd);
+          // eslint-disable-next-line no-await-in-loop
+          await sleepMs(30);
+        }
+
+        let readback = null;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          readback = await transport.query(':SOUR:WAV?', 128);
+        } catch (_) {
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            readback = await transport.query(':SOURCE:WAVELENGTH?', 128);
+          } catch (_) {
+            readback = null;
+          }
+        }
+
+        if (readback != null) {
+          const parsed = Number(String(readback).trim());
+          if (Number.isFinite(parsed) && Math.abs(parsed - wl) > 0.5) {
+            throw new Error('Wavelength readback mismatch (' + parsed + ' vs ' + wl + ')');
+          }
+        }
+
+        return { ok: true, readback };
+      } catch (err) {
+        errors.push(String(err?.message || err));
+      }
+    }
+
+    return { ok: false, reason: errors.join(' | ') || 'unknown' };
+  }
 
   async _runSweepCapture(session, resource, params) {
     const res = String(resource || '').trim();
@@ -1252,6 +1302,8 @@ class CoreDAQBackend {
     const samplesTotal = Math.max(1, Math.round(sweepDurationS * sampleRate));
 
     const prevStream = !!session.stream_enabled;
+    let transport = null;
+    let laser = null;
     let previousMask = null;
     let maskApplied = false;
 
@@ -1323,7 +1375,7 @@ class CoreDAQBackend {
       let gpibIdn = null;
       let gpibModel = null;
 
-      const transport = this.visa.open(res, 5000);
+      transport = this.visa.open(res, 5000);
       try {
         gpibIdn = await transport.query('*IDN?', 4096);
         gpibModel = detectLaserModel(gpibIdn);
@@ -1335,7 +1387,7 @@ class CoreDAQBackend {
         this.gpibModel = gpibModel;
         this.gpibResource = res;
 
-        const { laser } = createLaserFromIdn(gpibIdn, transport);
+        ({ laser } = createLaserFromIdn(gpibIdn, transport));
 
         this.captureMessage = 'Configuring laser';
         await laser.configureForSweep({ startNm, stopNm, powerMw, speedNmS });
@@ -1354,21 +1406,12 @@ class CoreDAQBackend {
             `Laser sweep did not finish in time (status=${String(sweepState.raw || 'running')}).`,
           );
         }
-
-        // Return laser to default wavelength after sweep.
-        try {
-          await laser.setWavelengthNm(returnWavelengthNm);
-        } catch (_) {
-          // ignore return-to-default failures
-        }
       } catch (err) {
         const msg = String(err?.message || err);
         if (msg.includes('Unsupported laser model')) throw err;
         throw new Error(
           `Laser not found or not responding on VISA resource "${res}". Run Scan VISA and *IDN? to verify connection.`,
         );
-      } finally {
-        await transport.close().catch(() => {});
       }
 
       this.captureMessage = 'Transferring capture from CoreDAQ';
@@ -1401,6 +1444,13 @@ class CoreDAQBackend {
         roomHumidityPct = Number(await session.dev.get_head_humidity());
       } catch (_) {
         roomHumidityPct = null;
+      }
+
+      if (transport) {
+        const laserReturn = await this._returnLaserToWavelength(transport, returnWavelengthNm);
+        if (!laserReturn.ok) {
+          this.captureMessage = `Sweep complete, but laser return failed (${String(laserReturn.reason || 'unknown')})`;
+        }
       }
 
       const payload = {
@@ -1450,6 +1500,9 @@ class CoreDAQBackend {
         } catch (_) {
           // ignore restore failures
         }
+      }
+      if (transport) {
+        await transport.close().catch(() => {});
       }
       session.stream_enabled = prevStream;
       session.busy = false;
