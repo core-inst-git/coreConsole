@@ -1,8 +1,8 @@
 // Example: transfer frames in W and measure time
 // Requirements: npm install serialport
 
-const PORT = 'COM3'; // change to your COM port
-const FRAMES = 100000; // adjust
+const PORT = 'COM5'; // change to your COM port
+const FRAMES = 10000; // adjust
 
 const { CoreDAQ } = require('../coredaq_js_api');
 
@@ -10,11 +10,12 @@ const { CoreDAQ } = require('../coredaq_js_api');
   const dev = await CoreDAQ.open(PORT);
   try {
     console.log('Arming acquisition...');
+    await dev.set_freq(100000);
     await dev.arm_acquisition(FRAMES, false);
     await dev.start_acquisition();
 
     // Wait for acquisition to complete
-    await dev.wait_for_completion(0.25, 30);
+    await new Promise((r) => setTimeout(r, Math.ceil((FRAMES / 100000) * 1000) + 50));
 
     const t0 = Date.now();
     const watts = await dev.transfer_frames_W(FRAMES);
