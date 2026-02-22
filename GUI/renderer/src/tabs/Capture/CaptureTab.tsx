@@ -699,7 +699,6 @@ export default function CaptureTab({
     }
 
     const clampedRate = clampSampleRate(sampleRateHz);
-    if (clampedRate !== sampleRateHz) setSampleRateHz(clampedRate);
     const clampedOsIdx = Math.min(osIdx, maxOsForFreq(clampedRate));
     if (clampedOsIdx !== osIdx) {
       setOsIdx(clampedOsIdx);
@@ -1203,6 +1202,7 @@ export default function CaptureTab({
     </section>
   );
 }
+
 
 
 

@@ -1346,6 +1346,13 @@ class CoreDAQBackend {
             `Laser sweep did not finish in time (status=${String(sweepState.raw || 'running')}).`,
           );
         }
+
+        // Return laser to default wavelength after sweep.
+        try {
+          await laser.setWavelengthNm(1550.0);
+        } catch (_) {
+          // ignore return-to-default failures
+        }
       } catch (err) {
         const msg = String(err?.message || err);
         if (msg.includes('Unsupported laser model')) throw err;
@@ -1364,10 +1371,11 @@ class CoreDAQBackend {
         );
       }
 
-      const channelsW = await session.dev.transfer_frames_W(samplesTotal);
+      let channelsW = await session.dev.transfer_frames_W(samplesTotal);
       if (!Array.isArray(channelsW) || channelsW.length < 4) {
         throw new Error('Invalid transfer payload from CoreDAQ');
       }
+      channelsW = channelsW.map((ch, idx) => (activeChannels.includes(idx) ? ch : []));
 
       const series = this._buildSweepSeries(channelsW, startNm, stopNm, sampleRate, samplesTotal, previewPoints);
       const activeChannels = activeChannelIndices(channelMask);
@@ -1926,6 +1934,7 @@ main().catch((err) => {
   console.error('[coredaq-service-js] fatal:', err);
   process.exit(1);
 });
+
 
 
 
