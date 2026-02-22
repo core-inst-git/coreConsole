@@ -726,6 +726,12 @@ export default function CaptureTab({
       sample_rate_hz: clampedRate,
       os_idx: clampedOsIdx,
       channel_mask: channelMask,
+      virtual_channels: selectedVirtualDefs.map((v) => ({
+        name: v.name,
+        math: v.mathType || 'sum',
+        src: { a: v.srcA ?? 0, b: v.srcB ?? 0 },
+        unit: v.mathType === 'db' ? 'dB' : 'W',
+      })),
       preview_points: SWEEP_PREVIEW_POINTS_DEFAULT,
     };
     if (selectedIsLinear) {
