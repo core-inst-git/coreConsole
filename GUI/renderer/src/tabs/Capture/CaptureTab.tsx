@@ -999,6 +999,7 @@ export default function CaptureTab({
                   max={SAMPLE_RATE_MAX}
                   step="1"
                   value={sampleRateHz}
+                  onChange={(e) => setSampleRateHz(clampSampleRate(Number(e.target.value)))}
                 />
                 <div className="capture-hint">Default 50,000 Hz - Max 100,000 Hz</div>
               </div>
