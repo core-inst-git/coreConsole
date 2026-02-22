@@ -781,6 +781,10 @@ class CoreDAQ:
 
     # ---------- Calibration loading ----------
     def _load_calibration_for_frontend(self):
+        # Silicon heads use analytical conversion and do not expose CAL/LOGCAL.
+        if self._detector_type == self.DETECTOR_SILICON:
+            return
+
         if self._frontend_type == self.FRONTEND_LINEAR:
             self._load_linear_calibration()
         elif self._frontend_type == self.FRONTEND_LOG:

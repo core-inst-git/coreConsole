@@ -1067,6 +1067,10 @@ class CoreDAQ {
   }
 
   async _load_calibration_for_frontend() {
+    // Silicon heads use analytical conversion and do not expose CAL/LOGCAL.
+    if (this._detector_type === CoreDAQ.DETECTOR_SILICON) {
+      return;
+    }
     if (this._frontend_type === CoreDAQ.FRONTEND_LINEAR) {
       await this._load_linear_calibration();
       return;
@@ -1077,7 +1081,6 @@ class CoreDAQ {
     }
     throw new CoreDAQError(`Unknown frontend type: ${this._frontend_type}`);
   }
-
   async _load_linear_calibration() {
     for (let head = 1; head <= CoreDAQ.NUM_HEADS; head += 1) {
       for (let gain = 0; gain < CoreDAQ.NUM_GAINS; gain += 1) {
