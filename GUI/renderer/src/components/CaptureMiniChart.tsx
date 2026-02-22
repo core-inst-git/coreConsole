@@ -9,6 +9,24 @@ type Props = {
   unit: string;
 };
 
+function computeAxisRange(vals: number[]): { min: number | null; max: number | null } {
+  if (!vals || vals.length === 0) return { min: null, max: null };
+  let min = Number.POSITIVE_INFINITY;
+  let max = Number.NEGATIVE_INFINITY;
+  for (const v of vals) {
+    if (!Number.isFinite(v)) continue;
+    if (v < min) min = v;
+    if (v > max) max = v;
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return { min: null, max: null };
+  if (min === max) {
+    const pad = Math.abs(min) * 0.02 + 1e-12;
+    return { min: min - pad, max: max + pad };
+  }
+  const pad = (max - min) * 0.02;
+  return { min: min - pad, max: max + pad };
+}
+
 function formatY(v: number): string {
   const a = Math.abs(v);
   if (a >= 1e3) return v.toFixed(0);
@@ -88,7 +106,14 @@ export default function CaptureMiniChart({ points, color, unit }: Props) {
 
   useEffect(() => {
     if (!instRef.current) return;
+    const xs = points.map((p) => p[0]);
+    const ys = points.map((p) => p[1]);
+    const xr = computeAxisRange(xs);
+    const yr = computeAxisRange(ys);
+
     instRef.current.setOption({
+      xAxis: { min: xr.min ?? undefined, max: xr.max ?? undefined },
+      yAxis: { min: yr.min ?? undefined, max: yr.max ?? undefined },
       series: [
         {
           type: 'line',
@@ -110,3 +135,5 @@ export default function CaptureMiniChart({ points, color, unit }: Props) {
 
   return <div className="chart" ref={chartRef} />;
 }
+
+

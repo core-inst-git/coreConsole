@@ -30,6 +30,8 @@ type ActiveSeries = ChannelDef & {
   unit: string;
 };
 
+type PowerScale = { factor: number; unit: string };
+
 type GpibResource = {
   resource: string;
   idn?: string | null;
@@ -183,7 +185,7 @@ function buildSweepMask(channels: ChannelDef[]): number {
   return mask === 0 ? DEFAULT_SWEEP_MASK : mask & 0x0f;
 }
 
-function pickPowerScale(dataW: number[]): { factor: number; unit: string } {
+function pickPowerScale(dataW: number[]): PowerScale {
   let maxAbs = 0;
   for (const v of dataW) {
     const a = Math.abs(v);
@@ -252,6 +254,12 @@ export default function CaptureTab({
 
   const [sweepX, setSweepX] = useState<number[]>([]);
   const [physY, setPhysY] = useState<number[][]>([[], [], [], []]); // stored in W
+  const [physScale, setPhysScale] = useState<PowerScale[]>([
+    pickPowerScale([]),
+    pickPowerScale([]),
+    pickPowerScale([]),
+    pickPowerScale([]),
+  ]);
   const [samplesTotal, setSamplesTotal] = useState<number | null>(null);
   const [hasSweepData, setHasSweepData] = useState(false);
   const [running, setRunning] = useState(false);
@@ -506,8 +514,15 @@ export default function CaptureTab({
         }
 
         const series = Array.isArray(msg.series) ? (msg.series as Array<{ data?: unknown }>) : [];
+        const channelsW = Array.isArray(msg.channels_w) ? (msg.channels_w as unknown[]) : [];
         const nextX: number[] = [];
         const nextY: number[][] = [[], [], [], []];
+        const nextScale: PowerScale[] = [
+          pickPowerScale([]),
+          pickPowerScale([]),
+          pickPowerScale([]),
+          pickPowerScale([]),
+        ];
 
         for (let ch = 0; ch < 4; ch += 1) {
           const data = Array.isArray(series[ch]?.data) ? (series[ch]?.data as unknown[]) : [];
@@ -524,10 +539,17 @@ export default function CaptureTab({
             for (const p of pts) nextX.push(p[0]);
           }
           for (const p of pts) nextY[ch].push(p[1]);
+          if (Array.isArray(channelsW[ch])) {
+            const raw = (channelsW[ch] as number[]).map((v) => Number(v) || 0);
+            nextScale[ch] = pickPowerScale(raw);
+          } else {
+            nextScale[ch] = pickPowerScale(nextY[ch]);
+          }
         }
 
         setSweepX(nextX);
         setPhysY(nextY);
+        setPhysScale(nextScale);
         setHasSweepData(true);
         return;
       }
@@ -759,7 +781,7 @@ export default function CaptureTab({
         const len = Math.min(sweepX.length, yRaw.length);
         const yTrim = yRaw.slice(0, len);
         const xTrim = sweepX.slice(0, len);
-        const scale = pickPowerScale(yTrim);
+        const scale = physScale[idx] ?? pickPowerScale(yTrim);
         const points: Point[] = new Array(len);
         for (let i = 0; i < len; i += 1) {
           points[i] = [xTrim[i], yTrim[i] * scale.factor];
@@ -784,7 +806,7 @@ export default function CaptureTab({
       }
       return { ...def, points, unit: scale.unit };
     });
-  }, [active, sweepX, physY]);
+  }, [active, sweepX, physY, physScale]);
 
   const removeChannel = (id: string) =>
     setActive((prev) => {
@@ -1162,3 +1184,20 @@ export default function CaptureTab({
     </section>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
