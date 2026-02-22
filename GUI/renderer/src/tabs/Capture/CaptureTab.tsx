@@ -252,12 +252,17 @@ export default function CaptureTab({
   const [stopNm, setStopNm] = useState(1600);
   const [speedNmS, setSpeedNmS] = useState(50);
   const [powerMw, setPowerMw] = useState(1);
+  const [sampleRateHz, setSampleRateHz] = useState(() => captureSessionCache.sample_rate_hz ?? SAMPLE_RATE_DEFAULT);
+  const [osIdx, setOsIdx] = useState(() => captureSessionCache.os_idx ?? 0);
 
   useEffect(() => {
+    captureSessionCache.sample_rate_hz = sampleRateHz;
   }, [sampleRateHz]);
 
   useEffect(() => {
+    captureSessionCache.os_idx = osIdx;
   }, [osIdx]);
+
   const [gains, setGains] = useState([0, 0, 0, 0]);
   const seededDeviceIdRef = useRef<string>('');
 
