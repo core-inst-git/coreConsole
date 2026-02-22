@@ -113,7 +113,11 @@ export default function CaptureMiniChart({ points, color, unit }: Props) {
 
     instRef.current.setOption({
       xAxis: { min: xr.min ?? undefined, max: xr.max ?? undefined },
-      yAxis: { min: yr.min ?? undefined, max: yr.max ?? undefined },
+      yAxis: {
+        min: yr.min ?? undefined,
+        max: yr.max ?? undefined,
+        axisLabel: { formatter: (v: number) => `${formatY(v)} ${unit}` },
+      },
       series: [
         {
           type: 'line',
@@ -131,9 +135,12 @@ export default function CaptureMiniChart({ points, color, unit }: Props) {
         },
       ],
     });
-  }, [points, color]);
+  }, [points, color, unit]);
 
   return <div className="chart" ref={chartRef} />;
 }
+
+
+
 
 
