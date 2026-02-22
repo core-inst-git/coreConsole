@@ -1220,6 +1220,7 @@ class CoreDAQBackend {
     const startNm = Number(params.start_nm ?? 1480.0);
     const stopNm = Number(params.stop_nm ?? 1620.0);
     const powerMw = Number(params.power_mw ?? 1.0);
+    const returnWavelengthNm = Number(params.return_wavelength_nm ?? 1550.0);
     const speedNmS = Number(params.speed_nm_s ?? 50.0);
     let sampleRate = Math.trunc(Number(params.sample_rate_hz ?? SWEEP_SAMPLE_RATE_DEFAULT_HZ));
     const osIdxRequested = Math.max(0, Math.min(7, Math.trunc(Number(params.os_idx ?? session.default_os_idx))));
@@ -1349,7 +1350,7 @@ class CoreDAQBackend {
 
         // Return laser to default wavelength after sweep.
         try {
-          await laser.setWavelengthNm(1550.0);
+          await laser.setWavelengthNm(returnWavelengthNm);
         } catch (_) {
           // ignore return-to-default failures
         }
@@ -1371,6 +1372,8 @@ class CoreDAQBackend {
         );
       }
 
+      const activeChannels = activeChannelIndices(channelMask);
+
       let channelsW = await session.dev.transfer_frames_W(samplesTotal);
       if (!Array.isArray(channelsW) || channelsW.length < 4) {
         throw new Error('Invalid transfer payload from CoreDAQ');
@@ -1378,7 +1381,6 @@ class CoreDAQBackend {
       channelsW = channelsW.map((ch, idx) => (activeChannels.includes(idx) ? ch : []));
 
       const series = this._buildSweepSeries(channelsW, startNm, stopNm, sampleRate, samplesTotal, previewPoints);
-      const activeChannels = activeChannelIndices(channelMask);
 
       let roomTempC = null;
       let roomHumidityPct = null;
@@ -1406,6 +1408,7 @@ class CoreDAQBackend {
         start_nm: startNm,
         stop_nm: stopNm,
         power_mw: powerMw,
+        return_wavelength_nm: returnWavelengthNm,
         speed_nm_s: speedNmS,
         sample_rate_hz: sampleRate,
         os_idx: Number(session.os_idx),

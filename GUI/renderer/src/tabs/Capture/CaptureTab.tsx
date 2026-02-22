@@ -722,6 +722,7 @@ export default function CaptureTab({
       stop_nm: stopNm,
       speed_nm_s: speedNmS,
       power_mw: powerMw,
+      return_wavelength_nm: (typeof selectedDevice?.wavelength_nm === 'number' && Number.isFinite(selectedDevice.wavelength_nm)) ? selectedDevice.wavelength_nm : 1550.0,
       sample_rate_hz: clampedRate,
       os_idx: clampedOsIdx,
       channel_mask: channelMask,
