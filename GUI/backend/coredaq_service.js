@@ -1225,6 +1225,13 @@ class CoreDAQBackend {
     let sampleRate = Math.trunc(Number(params.sample_rate_hz ?? SWEEP_SAMPLE_RATE_DEFAULT_HZ));
     const osIdxRequested = Math.max(0, Math.min(7, Math.trunc(Number(params.os_idx ?? session.default_os_idx))));
     const channelMask = (Math.trunc(Number(params.channel_mask ?? 0x0f)) & 0x0f) || 0x0f;
+    const saveChannelMaskRaw = params.save_channel_mask;
+    let saveChannelMask = null;
+    if (saveChannelMaskRaw !== undefined && saveChannelMaskRaw !== null && saveChannelMaskRaw !== '') {
+      const v = Math.trunc(Number(saveChannelMaskRaw));
+      if (Number.isFinite(v)) saveChannelMask = v & 0x0f;
+    }
+    if (saveChannelMask == null) saveChannelMask = channelMask;
     const previewPoints = Math.trunc(Number(params.preview_points ?? 24000));
 
     const gainsIn = Array.isArray(params.gains) ? params.gains : [0, 0, 0, 0];
@@ -1373,6 +1380,7 @@ class CoreDAQBackend {
       }
 
       const activeChannels = activeChannelIndices(channelMask);
+      const saveActiveChannels = activeChannelIndices(saveChannelMask);
 
       let channelsW = await session.dev.transfer_frames_W(samplesTotal);
       if (!Array.isArray(channelsW) || channelsW.length < 4) {
@@ -1417,6 +1425,8 @@ class CoreDAQBackend {
         gains,
         channel_mask: channelMask,
         active_channels: activeChannels,
+        save_channel_mask: saveChannelMask,
+        save_active_channels: saveActiveChannels,
         samples_total: samplesTotal,
         sweep_duration_s: sweepDurationS,
         room_temp_c: roomTempC,
@@ -1461,7 +1471,9 @@ class CoreDAQBackend {
 
 
     const payload = this.lastSweep;
-    const active = Array.isArray(payload?.active_channels) ? payload.active_channels : [];
+    const active = Array.isArray(payload?.save_active_channels)
+      ? payload.save_active_channels
+      : (Array.isArray(payload?.active_channels) ? payload.active_channels : []);
     const compactChannelsW = active.map((idx) => ({
       index: idx,
       name: `CH${idx + 1}`,
@@ -1505,11 +1517,18 @@ class CoreDAQBackend {
           power_scaled: this.lastSweep?.series?.[0]?.unit || null,
           power_scaled_note: 'Scaled series uses the unit shown in GUI at capture time.',
         },
-        physical_channels: (this.lastSweep.active_channels || []).map((ch) => ({
+        physical_channels: (this.lastSweep.save_active_channels || this.lastSweep.active_channels || []).map((ch) => ({
           index: ch,
           name: `CH${ch + 1}`,
           color: (this.lastSweep.series && this.lastSweep.series[ch] && this.lastSweep.series[ch].color) || null,
         })),
+        acquisition_physical_channels: (this.lastSweep.active_channels || []).map((ch) => ({
+          index: ch,
+          name: `CH${ch + 1}`,
+          color: (this.lastSweep.series && this.lastSweep.series[ch] && this.lastSweep.series[ch].color) || null,
+        })),
+        acquisition_channel_mask: this.lastSweep.channel_mask ?? null,
+        save_channel_mask: this.lastSweep.save_channel_mask ?? null,
         virtual_channels: (this.lastSweep.virtual_channels || []).map((v) => ({
           name: v.name,
           math: v.math,

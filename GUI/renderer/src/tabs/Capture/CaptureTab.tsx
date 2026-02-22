@@ -189,6 +189,17 @@ function buildSweepMask(channels: ChannelDef[]): number {
   return mask === 0 ? DEFAULT_SWEEP_MASK : mask & 0x0f;
 }
 
+function buildSaveMask(channels: ChannelDef[]): number {
+  let mask = 0;
+  for (const ch of channels) {
+    if (ch.type !== 'physical') continue;
+    const idx = channelIndexFromId(ch.id);
+    if (idx !== null) mask |= 1 << idx;
+  }
+  return mask & 0x0f;
+}
+
+
 function pickPowerScale(dataW: number[]): PowerScale {
   let maxAbs = 0;
   for (const v of dataW) {
@@ -717,6 +728,7 @@ export default function CaptureTab({
     addLog(`Starting sweep on ${selectedDeviceId}...`);
 
     const channelMask = buildSweepMask(active);
+    const saveChannelMask = buildSaveMask(active);
     const params: Record<string, unknown> = {
       start_nm: startNm,
       stop_nm: stopNm,
@@ -726,6 +738,7 @@ export default function CaptureTab({
       sample_rate_hz: clampedRate,
       os_idx: clampedOsIdx,
       channel_mask: channelMask,
+      save_channel_mask: saveChannelMask,
       virtual_channels: selectedVirtualDefs.map((v) => ({
         name: v.name,
         math: v.mathType || 'sum',
