@@ -1616,7 +1616,33 @@ class CoreDAQBackend {
         ws.send(JSON.stringify({ type: 'control', action, ok: true, error: null, device_id: sess.device_id }));
         return;
       }
-
+      if (action === 'set_freq') {
+        const sess = this._getSession(requestedId);
+        const freqHz = Number(data.freq_hz);
+        if (!Number.isFinite(freqHz) || freqHz <= 0) {
+          throw new Error('Invalid freq_hz');
+        }
+        await sess.dev.set_freq(freqHz);
+        sess.freq_hz = Number(await sess.dev.get_freq_hz());
+        if (data.os_idx != null) {
+          const osIdx = Math.trunc(Number(data.os_idx));
+          if (Number.isFinite(osIdx)) {
+            sess.default_os_idx = osIdx;
+            await sess.dev.set_oversampling(osIdx);
+            sess.os_idx = Number(await sess.dev.get_oversampling());
+          }
+        }
+        ws.send(JSON.stringify({
+          type: 'control',
+          action,
+          ok: true,
+          error: null,
+          device_id: sess.device_id,
+          freq_hz: sess.freq_hz,
+          os_idx: sess.os_idx,
+        }));
+        return;
+      }
       if (action === 'set_wavelength') {
         const sess = this._getSession(requestedId);
         const wavelengthNm = Number(data.wavelength_nm);
@@ -1900,3 +1926,6 @@ main().catch((err) => {
   console.error('[coredaq-service-js] fatal:', err);
   process.exit(1);
 });
+
+
+

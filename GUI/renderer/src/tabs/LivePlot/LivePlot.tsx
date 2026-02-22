@@ -258,6 +258,11 @@ export default function LivePlot({
     });
   };
 
+  useEffect(() => {
+    if (!activeDevice) return;
+    sendControl({ action: 'set_freq', device_id: activeDevice.device_id, freq_hz: 500 });
+  }, [activeDevice?.device_id]);
+
   const updateGain = (idx: number, val: number) => {
     if (!activeDevice || !activeIsLinear) return;
     sendControl({ action: 'set_gain', device_id: activeDevice.device_id, head: idx + 1, gain: val });

@@ -63,10 +63,14 @@ const captureSessionCache: {
   resources: GpibResource[];
   selectedResource: string;
   gpibModel: string | null;
+  sample_rate_hz: number | null;
+  os_idx: number | null;
 } = {
   resources: [],
   selectedResource: '',
   gpibModel: null,
+  sample_rate_hz: null,
+  os_idx: null,
 };
 
 function tsNow(): string {
@@ -224,6 +228,7 @@ export default function CaptureTab({
   const selectedIsLinear = selectedDevice?.frontend_type === 'LINEAR';
   const selectedDetectorType = (selectedDevice?.detector_type || 'INGAAS').toString().toUpperCase();
 
+
   useEffect(() => {
     if (activeDeviceId && sortedDevices.some((d) => d.device_id === activeDeviceId)) {
       setSelectedDeviceId(activeDeviceId);
@@ -247,8 +252,12 @@ export default function CaptureTab({
   const [stopNm, setStopNm] = useState(1600);
   const [speedNmS, setSpeedNmS] = useState(50);
   const [powerMw, setPowerMw] = useState(1);
-  const [sampleRateHz, setSampleRateHz] = useState(SAMPLE_RATE_DEFAULT);
-  const [osIdx, setOsIdx] = useState(0);
+
+  useEffect(() => {
+  }, [sampleRateHz]);
+
+  useEffect(() => {
+  }, [osIdx]);
   const [gains, setGains] = useState([0, 0, 0, 0]);
   const seededDeviceIdRef = useRef<string>('');
 
@@ -300,6 +309,17 @@ export default function CaptureTab({
       return merged;
     });
   }, []);
+
+  useEffect(() => {
+    if (!selectedDeviceId) return;
+    sendControl({
+      action: 'set_freq',
+      device_id: selectedDeviceId,
+      freq_hz: clampSampleRate(sampleRateHz),
+      os_idx: osIdx,
+    });
+  }, [selectedDeviceId, sampleRateHz, osIdx]);
+
   const maxOsIdxForRate = useMemo(() => maxOsForFreq(sampleRateHz), [sampleRateHz]);
   const selectedVirtualDefs = useMemo<ChannelDef[]>(() => {
     if (!selectedDeviceId) return [];
@@ -332,10 +352,6 @@ export default function CaptureTab({
       return;
     }
     seededDeviceIdRef.current = selectedDevice.device_id;
-    if (typeof selectedDevice.freq_hz === 'number') {
-      setSampleRateHz(clampSampleRate(Number(selectedDevice.freq_hz)));
-    }
-    if (typeof selectedDevice.os_idx === 'number') setOsIdx(Number(selectedDevice.os_idx));
     if (
       selectedDevice.frontend_type === 'LINEAR'
       && Array.isArray(selectedDevice.gains)
@@ -502,7 +518,6 @@ export default function CaptureTab({
         addLog(`Sweep complete: ${n} samples`);
         const effectiveRate = Number(msg.sample_rate_hz);
         if (Number.isFinite(effectiveRate) && effectiveRate > 0) {
-          setSampleRateHz(clampSampleRate(effectiveRate));
         }
         const effectiveOs = Number(msg.os_idx);
         if (Number.isFinite(effectiveOs) && effectiveOs >= OS_IDX_MIN) {
@@ -973,7 +988,6 @@ export default function CaptureTab({
                   max={SAMPLE_RATE_MAX}
                   step="1"
                   value={sampleRateHz}
-                  onChange={(e) => setSampleRateHz(clampSampleRate(Number(e.target.value)))}
                 />
                 <div className="capture-hint">Default 50,000 Hz - Max 100,000 Hz</div>
               </div>
@@ -1184,6 +1198,22 @@ export default function CaptureTab({
     </section>
   );
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 

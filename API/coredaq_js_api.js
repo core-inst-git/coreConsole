@@ -1554,7 +1554,7 @@ class CoreDAQ {
     }
   }
 
-  async transfer_frames_adc(frames, idle_timeout_s = 2.0, overall_timeout_s = null) {
+  async transfer_frames_adc(frames, idle_timeout_s = 6.0, overall_timeout_s = null) {
     await this.ready();
     const nFrames = Number(frames);
     if (!(nFrames > 0)) {
@@ -1581,7 +1581,7 @@ class CoreDAQ {
 
     let overallTimeoutS = overall_timeout_s;
     if (overallTimeoutS === null || typeof overallTimeoutS === 'undefined') {
-      overallTimeoutS = Math.max(5.0, (bytesNeeded / 1_000_000.0) * 8.0);
+      overallTimeoutS = Math.max(8.0, (bytesNeeded / 1_000_000.0) * 12.0);
     }
 
     const payload = await this._withLock(async () => {
@@ -2088,3 +2088,4 @@ module.exports = {
   CoreDAQ,
   CoreDAQError,
 };
+

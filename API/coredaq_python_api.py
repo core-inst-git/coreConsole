@@ -1258,7 +1258,7 @@ class CoreDAQ:
     def transfer_frames_adc(
         self,
         frames: int,
-        idle_timeout_s: float = 2.0,
+        idle_timeout_s: float = 6.0,
         overall_timeout_s: Optional[float] = None,
     ) -> List[List[int]]:
         """
@@ -1289,7 +1289,7 @@ class CoreDAQ:
         # Estimate a reasonable overall timeout if not provided.
         # HS CDC throughput can vary on Windows; keep this generous.
         if overall_timeout_s is None:
-            overall_timeout_s = max(5.0, bytes_needed / 1_000_000.0 * 8.0)
+            overall_timeout_s = max(8.0, bytes_needed / 1_000_000.0 * 12.0)
 
         with self._lock:
             ser.reset_input_buffer()
@@ -1656,3 +1656,4 @@ class CoreDAQ:
                     found.append(p.device)
 
         return found
+
