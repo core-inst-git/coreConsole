@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # coredaq_py_api.py  v3.2
 # High-level driver for coreDAQ
 #
@@ -31,7 +31,7 @@ NumOrSeq = Union[Number, List[Number], Tuple[Number, ...]]
 class CoreDAQ:
     # --- Device/ADC constants ---
     ADC_BITS = 16
-    ADC_VFS_VOLTS = 5.0  # ±5 V range (full-scale magnitude)
+    ADC_VFS_VOLTS = 5.0  # Â±5 V range (full-scale magnitude)
     # For signed 16-bit bipolar ADC codes, LSB_V = (2*Vfs) / 2^bits
     ADC_LSB_VOLTS = (2.0 * ADC_VFS_VOLTS) / (2 ** ADC_BITS)
     ADC_LSB_MV = ADC_LSB_VOLTS * 1e3
@@ -66,22 +66,22 @@ class CoreDAQ:
     GAIN_MAX_POWER_W = [
         5e-3,      # G0: 5 mW
         1e-3,      # G1: 1 mW
-        500e-6,    # G2: 500 µW
-        100e-6,    # G3: 100 µW
-        50e-6,     # G4: 50 µW
-        10e-6,     # G5: 10 µW
-        5e-6,      # G6: 5 µW
+        500e-6,    # G2: 500 ÂµW
+        100e-6,    # G3: 100 ÂµW
+        50e-6,     # G4: 50 ÂµW
+        10e-6,     # G5: 10 ÂµW
+        5e-6,      # G6: 5 ÂµW
         500e-9,    # G7: 500 nW
     ]
 
     GAIN_LABELS = [
         "5 mW",
         "1 mW",
-        "500 µW",
-        "100 µW",
-        "50 µW",
-        "10 µW",
-        "5 µW",
+        "500 ÂµW",
+        "100 ÂµW",
+        "50 ÂµW",
+        "10 ÂµW",
+        "5 ÂµW",
         "500 nW",
     ]
 
@@ -1018,9 +1018,9 @@ class CoreDAQ:
         use_zero: Optional[bool] = None,   # kept for compatibility; ignored
         autogain: bool = False,
         # autogain params (LINEAR only)
-        min_mv: float = 100,
-        max_mv: float = 3500.0,
-        max_iters: int = 10,
+        min_mv: float = 100.0,
+        max_mv: float = 3000.0,
+                max_iters: int = 10,
         settle_s: float = 0.01,
         return_debug: bool = False,
         # LOG only (optional override)
@@ -1033,8 +1033,6 @@ class CoreDAQ:
           - INGAAS: Uses slope/intercept (mV/W, mV) and current gains.
           - SILICON: Uses TIA gain model + Si responsivity curve.
           - If autogain=True, adjusts gains to keep |mV| within [min_mv, max_mv].
-            The default max_mv keeps headroom from ADC rail so downshift still
-            triggers when analog stages saturate below ±5 V full-scale.
           - Always subtracts per-channel ADC zero (factory or soft).
 
         LOG:
@@ -1660,4 +1658,5 @@ class CoreDAQ:
                     found.append(p.device)
 
         return found
+
 

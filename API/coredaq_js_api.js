@@ -1,4 +1,4 @@
-'use strict';
+﻿'use strict';
 
 const fs = require('fs');
 const path = require('path');
@@ -103,11 +103,11 @@ class CoreDAQ {
   static GAIN_LABELS = [
     '5 mW',
     '1 mW',
-    '500 µW',
-    '100 µW',
-    '50 µW',
-    '10 µW',
-    '5 µW',
+    '500 ÂµW',
+    '100 ÂµW',
+    '50 ÂµW',
+    '10 ÂµW',
+    '5 ÂµW',
     '500 nW',
   ];
 
@@ -1305,8 +1305,8 @@ class CoreDAQ {
     poll_hz = 200.0,
     _use_zero = null,
     autogain = false,
-    min_mv = 100,
-    max_mv = 3500.0,
+    min_mv = 100.0,
+    max_mv = 3000.0,
     max_iters = 10,
     settle_s = 0.01,
     return_debug = false,
@@ -2091,4 +2091,6 @@ module.exports = {
   CoreDAQ,
   CoreDAQError,
 };
+
+
 
