@@ -535,12 +535,11 @@ class CoreDAQ:
             return round(p_w, decimals)
 
         slope_mV_per_W = float(self._cal_slope[head_idx][gain])
-        intercept_mV = float(self._cal_intercept[head_idx][gain])
         if slope_mV_per_W == 0.0:
             raise CoreDAQError(f"Invalid slope for head {head_idx+1}, gain {gain}")
 
         power_lsb = self.ADC_LSB_MV / abs(slope_mV_per_W)
-        p_w = (float(mv_corr) - intercept_mV) / slope_mV_per_W
+        p_w = float(mv_corr) / slope_mV_per_W
         if self._detector_type == self.DETECTOR_INGAAS:
             corr = self._ingaas_responsivity_correction_factor()
             p_w *= corr
@@ -1658,5 +1657,6 @@ class CoreDAQ:
                     found.append(p.device)
 
         return found
+
 
 

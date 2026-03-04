@@ -294,7 +294,7 @@ export default function LivePlot({
         case 'db': {
           const num = Math.abs(va);
           const den = Math.abs(vb);
-          out[i] = den === 0 || num === 0 ? -120 : 20 * Math.log10(num / den);
+          out[i] = den === 0 || num === 0 ? -120 : 10 * Math.log10(num / den);
           break;
         }
         default:
@@ -453,7 +453,7 @@ export default function LivePlot({
                     }}
                     title="Close"
                   >
-                    ×
+                    Ã—
                   </button>
                 </div>
                 <LiveChart
@@ -472,7 +472,7 @@ export default function LivePlot({
             <div className="panel-title">Device Control</div>
             <div className="panel-meta">
               {activeDevice
-                ? `${activeDevice.device_id} • ${activeDevice.frontend_type || 'UNKNOWN'} • ${detectorType}`
+                ? `${activeDevice.device_id} â€¢ ${activeDevice.frontend_type || 'UNKNOWN'} â€¢ ${detectorType}`
                 : 'No active device'}
             </div>
           </div>
@@ -593,7 +593,7 @@ export default function LivePlot({
             </div>
             <div className="stat-hint">
               Range {Math.round(wavelengthMinNm)}-{Math.round(wavelengthMaxNm)} nm
-              {' • '}
+              {' â€¢ '}
               default 1550 nm
             </div>
           </div>
@@ -756,3 +756,4 @@ export default function LivePlot({
     </section>
   );
 }
+

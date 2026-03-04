@@ -97,6 +97,13 @@
         "filter": [
           "*.node"
         ]
+      },
+      {
+        "from": "../packages/ftdi-driver",
+        "to": "ftdi-driver",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "mac": {

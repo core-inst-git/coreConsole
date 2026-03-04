@@ -4,6 +4,7 @@ function detectLaserModel(idn) {
   const txt = String(idn || '').toUpperCase();
   if (txt.includes('TSL550') || (txt.includes('SANTEC') && txt.includes('550'))) return 'TSL550';
   if (txt.includes('TSL570') || (txt.includes('SANTEC') && txt.includes('570'))) return 'TSL570';
+  if (txt.includes('TSL710') || (txt.includes('SANTEC') && txt.includes('710'))) return 'TSL710';
   if (txt.includes('TSL770') || (txt.includes('SANTEC') && txt.includes('770'))) return 'TSL770';
   return null;
 }
@@ -19,12 +20,14 @@ function formatNumber(v) {
 }
 
 class BaseTSL {
-  constructor(transport, model) {
+  constructor(transport, model, options = {}) {
     if (!transport || typeof transport.write !== 'function' || typeof transport.query !== 'function') {
       throw new Error('transport must provide write(cmd) and query(cmd)');
     }
     this.transport = transport;
     this.model = String(model || 'TSL').toUpperCase();
+    const commandSet = String(options?.commandSet || options?.dialect || 'scpi').toLowerCase();
+    this.commandSet = commandSet === 'legacy' ? 'legacy' : 'scpi';
   }
 
   async idn() {
@@ -39,6 +42,48 @@ class BaseTSL {
     return String(await this.transport.query(cmd)).trim();
   }
 
+  _isLegacy() {
+    return this.commandSet === 'legacy';
+  }
+
+  async _writeAny(commands) {
+    let lastErr = null;
+    for (const cmd of commands) {
+      if (!cmd) continue;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await this.write(cmd);
+        return;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (lastErr) throw lastErr;
+    throw new Error('No command candidates provided');
+  }
+
+  async _queryAny(commands) {
+    let lastErr = null;
+    for (const cmd of commands) {
+      if (!cmd) continue;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const out = await this.query(cmd);
+        if (String(out || '').trim()) return String(out).trim();
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (lastErr) throw lastErr;
+    return '';
+  }
+
+  _legacySetCandidates(token, value) {
+    const t = String(token || '').trim().toUpperCase();
+    const v = formatNumber(value);
+    return [`${t}${v}`, `${t} ${v}`];
+  }
+
   async configureForSweep({ startNm, stopNm, powerMw, speedNmS }) {
     const start = Number(startNm);
     const stop = Number(stopNm);
@@ -48,6 +93,16 @@ class BaseTSL {
     if (!Number.isFinite(start) || !Number.isFinite(stop)) throw new Error('start/stop wavelength is invalid');
     if (!(speed > 0)) throw new Error('speed_nm_s must be > 0');
     if (!(power >= 0)) throw new Error('power_mw must be >= 0');
+
+    if (this._isLegacy()) {
+      // TSL short command set used on FTDI links.
+      await this._writeAny(['LO']);
+      await this._writeAny(['SO']);
+      await this._writeAny(['AF', 'AO']);
+      await this._writeAny(this._legacySetCandidates('LP', power));
+      await this._configureSweepAxisLegacy(start, stop, speed);
+      return;
+    }
 
     await this.write('*RST');
     await this.write(':POW:ATT:AUT 1');
@@ -65,20 +120,34 @@ class BaseTSL {
   }
 
   async startSweep() {
+    if (this._isLegacy()) {
+      await this._writeAny(['SG']);
+      return;
+    }
     await this.write('WAV:SWE 1');
   }
 
   async stopSweep() {
+    if (this._isLegacy()) {
+      await this._writeAny(['SQ']);
+      return;
+    }
     await this.write('WAV:SWE 0');
   }
 
   async setWavelengthNm(wavelengthNm) {
     const wl = Number(wavelengthNm);
     if (!Number.isFinite(wl) || wl <= 0) {
-      throw new Error("Invalid wavelength: ");
+      throw new Error(`Invalid wavelength: ${wavelengthNm}`);
     }
+
+    if (this._isLegacy()) {
+      await this._writeAny(this._legacySetCandidates('WA', wl));
+      return;
+    }
+
     await this.write(':WAV:UNIT 0');
-    await this.write(`:WAV `);
+    await this.write(`:WAV ${formatNumber(wl)}`);
   }
 
   _parseSweepState(raw) {
@@ -103,6 +172,31 @@ class BaseTSL {
   }
 
   async getSweepState() {
+    if (this._isLegacy()) {
+      try {
+        const sxRaw = await this._queryAny(['SX', 'SX?']);
+        const sxNum = Number(String(sxRaw || '').trim());
+        if (Number.isFinite(sxNum)) {
+          if (sxNum >= 1) {
+            return { known: true, running: false, raw: String(sxRaw), command: 'SX' };
+          }
+          return { known: true, running: true, raw: String(sxRaw), command: 'SX' };
+        }
+      } catch (_) {
+        // continue with SK fallback
+      }
+
+      try {
+        const skRaw = await this._queryAny(['SK', 'SK?', 'SU', 'SU?']);
+        const parsed = this._parseSweepState(skRaw);
+        if (parsed) return { ...parsed, command: 'SK' };
+      } catch (_) {
+        // ignore
+      }
+
+      return { known: false, running: null, raw: null, command: null };
+    }
+
     const queries = [
       ':WAV:SWE?',
       'WAV:SWE?',
@@ -148,14 +242,20 @@ class BaseTSL {
     }
   }
 
+  async _configureSweepAxisLegacy(startNm, stopNm, speedNmS) {
+    await this._writeAny(this._legacySetCandidates('SS', startNm));
+    await this._writeAny(this._legacySetCandidates('SE', stopNm));
+    await this._writeAny(this._legacySetCandidates('SN', speedNmS));
+    await this._writeAny(this._legacySetCandidates('SZ', 1));
+  }
+
   async _configureSweepAxis(_startNm, _stopNm, _speedNmS) {
     throw new Error('Not implemented');
   }
 }
-
 class TSL550 extends BaseTSL {
-  constructor(transport) {
-    super(transport, 'TSL550');
+  constructor(transport, options = {}) {
+    super(transport, 'TSL550', options);
   }
 
   async _configureSweepAxis(startNm, stopNm, speedNmS) {
@@ -168,8 +268,8 @@ class TSL550 extends BaseTSL {
 }
 
 class TSL570 extends BaseTSL {
-  constructor(transport) {
-    super(transport, 'TSL570');
+  constructor(transport, options = {}) {
+    super(transport, 'TSL570', options);
   }
 
   async _configureSweepAxis(startNm, stopNm, speedNmS) {
@@ -182,8 +282,8 @@ class TSL570 extends BaseTSL {
 }
 
 class TSL770 extends BaseTSL {
-  constructor(transport) {
-    super(transport, 'TSL770');
+  constructor(transport, options = {}) {
+    super(transport, 'TSL770', options);
   }
 
   async _configureSweepAxis(startNm, stopNm, speedNmS) {
@@ -196,20 +296,45 @@ class TSL770 extends BaseTSL {
   }
 }
 
-function createLaserDriver(model, transport) {
+
+class TSL710 extends BaseTSL {
+  constructor(transport, options = {}) {
+    super(transport, 'TSL710', options);
+  }
+
+  async _configureSweepAxis(startNm, stopNm, speedNmS) {
+    await this.write(':WAV:UNIT 0');
+    await this.write(`:WAV:SWE:SPE ${formatNumber(speedNmS)}`);
+    await this.write(`:WAV ${formatNumber(startNm)}`);
+    await this.write(`:WAV:SWE:STAR ${formatNumber(startNm)}`);
+    await this.write(`:WAV:SWE:STOP ${formatNumber(stopNm)}`);
+  }
+}
+
+function createLaserDriver(model, transport, options = {}) {
   const m = String(model || '').toUpperCase().trim();
-  if (m === 'TSL550') return new TSL550(transport);
-  if (m === 'TSL570') return new TSL570(transport);
-  if (m === 'TSL770') return new TSL770(transport);
+  if (m === 'TSL550') return new TSL550(transport, options);
+  if (m === 'TSL570') return new TSL570(transport, options);
+  if (m === 'TSL710') return new TSL710(transport, options);
+  if (m === 'TSL770') return new TSL770(transport, options);
   throw new Error(`Unsupported laser model: ${model}`);
 }
 
-function createLaserFromIdn(idn, transport) {
+function createLaserFromIdn(idn, transport, options = {}) {
   const model = detectLaserModel(idn);
-  if (!model) throw new Error('Unsupported laser model. Supported models: TSL550, TSL570, TSL770.');
+  if (!model) {
+    const commandSet = String(options?.commandSet || options?.dialect || 'scpi').toLowerCase();
+    if (commandSet === 'legacy') {
+      return {
+        model: 'TSL_LEGACY',
+        laser: new TSL550(transport, options),
+      };
+    }
+    throw new Error('Unsupported laser model. Supported models: TSL550, TSL570, TSL710, TSL770.');
+  }
   return {
     model,
-    laser: createLaserDriver(model, transport),
+    laser: createLaserDriver(model, transport, options),
   };
 }
 
@@ -218,7 +343,10 @@ module.exports = {
   BaseTSL,
   TSL550,
   TSL570,
+  TSL710,
   TSL770,
   createLaserDriver,
   createLaserFromIdn,
 };
+
+

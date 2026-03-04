@@ -58,6 +58,15 @@ const OS_IDX_MIN = 0;
 const OS_IDX_MAX = 6;
 const SWEEP_PREVIEW_POINTS_DEFAULT = 120_000;
 const DEFAULT_SWEEP_MASK = 0x0f;
+const CAPTURE_SELECTED_RESOURCE_KEY = 'coreconsole.capture.selected_resource';
+
+function loadPersistedSelectedResource(): string {
+  try {
+    return String(window.localStorage.getItem(CAPTURE_SELECTED_RESOURCE_KEY) || '').trim();
+  } catch (_) {
+    return '';
+  }
+}
 
 const captureSessionCache: {
   resources: GpibResource[];
@@ -100,9 +109,9 @@ function maxOsForFreq(freqHz: number): number {
 function userFacingSweepError(raw: string): string {
   const t = (raw || '').toLowerCase();
   if (t.includes('no gpib resource selected') || t.includes('no gpib resource provided')) {
-    return 'No laser resource selected. Click Scan VISA, select a resource, then run sweep.';
+    return 'No laser resource selected. Click Scan Resources, select a resource, then run sweep.';
   }
-  if (t.includes('not found or not responding on visa resource')) {
+  if (t.includes('not found or not responding on visa resource') || t.includes('not found or not responding on ftdi resource')) {
     return raw;
   }
   if (t.includes('unsupported laser model')) {
@@ -118,6 +127,7 @@ function detectLaserModelFromIdn(idnRaw: string): string | null {
   const t = String(idnRaw || '').toUpperCase();
   if (t.includes('TSL550') || (t.includes('SANTEC') && t.includes('550'))) return 'TSL550';
   if (t.includes('TSL570') || (t.includes('SANTEC') && t.includes('570'))) return 'TSL570';
+  if (t.includes('TSL710') || (t.includes('SANTEC') && t.includes('710'))) return 'TSL710';
   if (t.includes('TSL770') || (t.includes('SANTEC') && t.includes('770'))) return 'TSL770';
   return null;
 }
@@ -252,12 +262,22 @@ export default function CaptureTab({
   }, [activeDeviceId, sortedDevices]);
 
   const [resources, setResources] = useState<GpibResource[]>(() => captureSessionCache.resources);
-  const [selectedResource, setSelectedResource] = useState(() => captureSessionCache.selectedResource);
+  const [selectedResource, setSelectedResource] = useState(() => {
+    const cached = String(captureSessionCache.selectedResource || '').trim();
+    if (cached) return cached;
+    const persisted = loadPersistedSelectedResource();
+    if (persisted) {
+      captureSessionCache.selectedResource = persisted;
+      return persisted;
+    }
+    return '';
+  });
   const [captureState, setCaptureState] = useState('idle');
   const [captureMessage, setCaptureMessage] = useState('');
   const [gpibModel, setGpibModel] = useState<string | null>(() => captureSessionCache.gpibModel);
   const [gpibCmd, setGpibCmd] = useState('*IDN?');
   const [logs, setLogs] = useState<LogLine[]>([]);
+  const [scanWarnings, setScanWarnings] = useState<string[]>([]);
 
   const [startNm, setStartNm] = useState(1500);
   const [stopNm, setStopNm] = useState(1600);
@@ -461,25 +481,32 @@ export default function CaptureTab({
         if (msg.ok) {
           const rows = Array.isArray(msg.resources) ? (msg.resources as GpibResource[]) : [];
           setResourcesSnapshot(rows);
-          addLog(`GPIB scan complete: ${rows.length} resource(s)`);
+          addLog(`Laser scan complete: ${rows.length} resource(s)`);
           if (msg.timed_out) {
-            addLog('GPIB scan reached 5 s timeout; showing partial results.');
+            addLog('Laser scan reached timeout; showing partial results.');
           }
+
+          const warnings = Array.isArray(msg.warnings) ? (msg.warnings as unknown[]) : [];
+          setScanWarnings(warnings.map((w) => String(w)));
+          for (const w of warnings) {
+            addLog(`Warning: ${String(w)}`);
+          }
+
           const debugRows = Array.isArray(msg.debug) ? (msg.debug as unknown[]) : [];
           for (const d of debugRows) {
-            addLog(`VISA: ${String(d)}`);
+            addLog(`LASER IO: ${String(d)}`);
           }
           if (rows.length === 0) {
             const backendExe = String(msg.node_exe ?? msg.python_exe ?? 'unknown');
-            const hint = String(msg.backend ?? msg.visa_backend_hint ?? 'default');
-            addLog(`No VISA resources found. Backend hint=${hint}, Runtime=${backendExe}`);
+            const hint = String(msg.backend ?? 'mixed');
+            addLog(`No laser resources found. Backend=${hint}, Runtime=${backendExe}`);
           }
         } else {
-          addLog(`GPIB scan error: ${String(msg.error ?? 'Unknown')}`);
+          setScanWarnings([]);
+          addLog(`Laser scan error: ${String(msg.error ?? 'Unknown')}`);
         }
         return;
       }
-
       if (msg.action === 'gpib_query') {
         if (msg.ok) {
           const cmd = String(msg.command ?? '');
@@ -493,7 +520,7 @@ export default function CaptureTab({
               resource,
               idn: cmd.toUpperCase() === '*IDN?' || cmd.toUpperCase() === 'IDN?' ? reply : undefined,
               model: cmd.toUpperCase() === '*IDN?' || cmd.toUpperCase() === 'IDN?' ? model : undefined,
-              backend: 'visa-service',
+              backend: String(msg.backend ?? 'visa-service'),
             });
           }
         } else {
@@ -510,7 +537,7 @@ export default function CaptureTab({
             const model = typeof msg.model === 'string' && msg.model.length > 0 ? msg.model : null;
             setSelectedResourceCached(resource);
             if (model) setGpibModelCached(model);
-            upsertResource({ resource, idn, model, backend: 'visa-service' });
+            upsertResource({ resource, idn, model, backend: String(msg.backend ?? 'visa-service') });
           }
         }
         return;
@@ -605,84 +632,18 @@ export default function CaptureTab({
     if (scanningVisa) return;
     setScanningVisa(true);
     setScanProgressPct(4);
-    if (window.gpib?.listResources && window.gpib?.probeIdn) {
-      const runIpcScan = async (listTimeoutMs: number): Promise<GpibResource[]> => {
-        const health = window.gpib?.health ? await withTimeout(window.gpib.health(), 30000) : { enabled: true };
-        if (health && health.enabled === false) {
-          const reason = String((health as { reason?: string }).reason || 'VISA service unavailable');
-          throw new Error(reason);
-        }
-        const allResources = await withTimeout(window.gpib!.listResources!(), listTimeoutMs);
-        const gpibResources = allResources
-          .map((r) => String(r || '').trim())
-          .filter((r) => /^GPIB\d+::/i.test(r));
-        const resources = gpibResources.length > 0 ? gpibResources : allResources;
-        const rows: GpibResource[] = [];
-        for (const resource of resources) {
-          const res = String(resource || '').trim();
-          if (!res) continue;
-          let idn: string | null = null;
-          let model: string | null = null;
-          try {
-            const probe = await withTimeout(window.gpib!.probeIdn!(res, 1600, 2048), 3200);
-            if (probe?.ok) {
-              idn = String(probe?.data || '').trim() || null;
-              model = idn ? detectLaserModelFromIdn(idn) : null;
-            }
-          } catch {
-            // Keep scan resilient when a resource is busy/non-responsive.
-          }
-          rows.push({ resource: res, idn, model, backend: 'visa-service' });
-        }
-        return rows;
-      };
-
-      try {
-        const rows = await runIpcScan(12000);
-        setResourcesSnapshot(rows);
-        addLog(`GPIB scan complete: ${rows.length} resource(s)`);
-      } catch (err) {
-        addLog(`GPIB scan error: ${String((err as Error)?.message || err)}`);
-      } finally {
-        setScanningVisa(false);
-        setScanProgressPct(100);
-        window.setTimeout(() => setScanProgressPct(0), 250);
-      }
-      return;
-    }
-    sendControl({ action: 'gpib_scan', timeout_ms: 5000 });
+    setScanWarnings([]);
+    sendControl({ action: 'gpib_scan', timeout_ms: 12000 });
   };
-
   const doQuery = async () => {
     const cmd = gpibCmd.trim();
     if (!cmd) return;
     if (!selectedResource) {
-      addLog('Select a GPIB resource first.');
-      return;
-    }
-    if (window.gpib?.queryResource) {
-      try {
-        const out = await withTimeout(window.gpib.queryResource(selectedResource, cmd, 2500, 8192), 4000);
-        const reply = String((out as { data?: string } | null)?.data || '');
-        addLog(`${cmd} -> ${reply}`);
-        if (cmd.toUpperCase() === '*IDN?' || cmd.toUpperCase() === 'IDN?') {
-          const model = detectLaserModelFromIdn(reply);
-          if (model) setGpibModelCached(model);
-          upsertResource({
-            resource: selectedResource,
-            idn: reply || null,
-            model,
-            backend: 'visa-service',
-          });
-        }
-      } catch (err) {
-        addLog(`GPIB query error: ${String((err as Error)?.message || err)}`);
-      }
+      addLog('Select a laser resource first.');
       return;
     }
     sendControl({ action: 'gpib_query', resource: selectedResource, cmd });
   };
-
   const doRunSweep = () => {
     if (!connected || sortedDevices.length === 0) {
       warnUser('CoreDAQ not connected.');
@@ -697,7 +658,7 @@ export default function CaptureTab({
       return;
     }
     if (!selectedResource) {
-      warnUser('No laser resource selected. Click Scan VISA, select a resource, then run sweep.');
+      warnUser('No laser resource selected. Click Scan Resources, select a resource, then run sweep.');
       return;
     }
     const selectedRow = resources.find((r) => r.resource === selectedResource) || null;
@@ -805,7 +766,7 @@ export default function CaptureTab({
       else {
         const num = Math.abs(va);
         const den = Math.abs(vb);
-        v = den === 0 || num === 0 ? -120 : 20 * Math.log10(num / den);
+        v = den === 0 || num === 0 ? -120 : 10 * Math.log10(num / den);
       }
       out[i] = v;
     }
@@ -899,12 +860,17 @@ export default function CaptureTab({
           <div className="capture-fields">
             <div className="capture-toolbar">
               <button className="btn ghost" onClick={doScan} disabled={scanningVisa}>
-                {scanningVisa ? 'Scanning...' : 'Scan VISA'}
+                {scanningVisa ? 'Scanning...' : 'Scan Resources'}
               </button>
             </div>
             {scanningVisa && (
               <div className="scan-progress">
                 <div className="scan-progress-bar" style={{ width: `${scanProgressPct}%` }} />
+              </div>
+            )}
+            {scanWarnings.length > 0 && (
+              <div className="device-note" role="alert">
+                {scanWarnings.join(' | ')}
               </div>
             )}
 
@@ -1077,7 +1043,7 @@ export default function CaptureTab({
 
             <div className="capture-log">
               {logs.length === 0 ? (
-                <div className="console-empty">Use *IDN? to detect 550 / 570 / 770.</div>
+                <div className="console-empty">Use Scan Resources and *IDN? to detect TSL550/570/710/770.</div>
               ) : (
                 logs.map((l, i) => (
                   <div key={i} className="console-line rx">
@@ -1223,6 +1189,7 @@ export default function CaptureTab({
     </section>
   );
 }
+
 
 
 

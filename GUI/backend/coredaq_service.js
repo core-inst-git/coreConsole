@@ -65,6 +65,10 @@ const MAX_CONNECTED_DEVICES = 2;
 const MANUAL_CONNECT_PROBE_TIMEOUT_MS = 1000;
 
 const WS_HOST = '127.0.0.1';
+const FTDI_RESOURCE_PREFIX = 'FTDI::';
+const FTDI_VENDOR_IDS = new Set(['0403']);
+const FTDI_BAUD_CANDIDATES = [9600, 19200, 38400, 57600, 115200];
+const FTDI_SCAN_TIMEOUT_MAX_MS = 5000;
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms | 0)));
@@ -91,10 +95,23 @@ function withTimeout(promise, timeoutMs, timeoutCode = 'TIMEOUT') {
   });
 }
 
+function execFileAsync(file, args = [], opts = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, opts, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = String(stdout || '');
+        err.stderr = String(stderr || '');
+        reject(err);
+        return;
+      }
+      resolve({ stdout: String(stdout || ''), stderr: String(stderr || '') });
+    });
+  });
+}
+
 function nowSec() {
   return Date.now() / 1000;
 }
-
 function parseArgs(argv) {
   const out = {
     port: null,
@@ -363,6 +380,145 @@ class VisaSessionTransport {
   }
 }
 
+class SerialLaserTransport {
+  constructor(portPath, { baudRate = 9600, timeoutMs = 2000, terminator = '\r' } = {}) {
+    this.portPath = String(portPath || '').trim();
+    this.baudRate = Math.max(1200, Number(baudRate) || 9600);
+    this.timeoutMs = Math.max(100, Number(timeoutMs) || 2000);
+    this.terminator = String(terminator || '\r');
+    this.port = null;
+    this.rxBuffer = '';
+    this.onData = (chunk) => {
+      this.rxBuffer += Buffer.from(chunk || []).toString('ascii');
+      if (this.rxBuffer.length > 65536) {
+        this.rxBuffer = this.rxBuffer.slice(-32768);
+      }
+    };
+  }
+
+  _loadSerialPortCtor() {
+    const pkg = require('serialport');
+    return pkg?.SerialPort || pkg?.default || pkg;
+  }
+
+  async open() {
+    if (this.port && this.port.isOpen) return;
+    if (!this.portPath) throw new Error('No serial port provided');
+
+    const SerialPort = this._loadSerialPortCtor();
+    const port = new SerialPort({
+      path: this.portPath,
+      baudRate: this.baudRate,
+      autoOpen: false,
+    });
+
+    await new Promise((resolve, reject) => {
+      port.open((err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve();
+      });
+    });
+
+    port.on('data', this.onData);
+    this.port = port;
+    this.rxBuffer = '';
+  }
+
+  async _drain() {
+    if (!this.port || !this.port.isOpen) return;
+    await new Promise((resolve, reject) => {
+      this.port.drain((err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve();
+      });
+    });
+  }
+
+  _lineWithTerminator(cmd) {
+    let line = String(cmd || '').trim();
+    if (!line) throw new Error('Empty command');
+    if (!line.endsWith(this.terminator)) {
+      line = `${line}${this.terminator}`;
+    }
+    return line;
+  }
+
+  async write(cmd) {
+    await this.open();
+    const line = this._lineWithTerminator(cmd);
+    await new Promise((resolve, reject) => {
+      this.port.write(Buffer.from(line, 'ascii'), (err) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve();
+      });
+    });
+    await this._drain();
+    await sleepMs(20);
+  }
+
+  _normalizeReply(raw) {
+    const txt = String(raw || '').replace(/\0/g, '').replace(/\r/g, '\n');
+    const lines = txt
+      .split(/\n/g)
+      .map((line) => line.trim())
+      .filter(Boolean);
+    if (lines.length > 0) return lines[lines.length - 1];
+    return txt.trim();
+  }
+
+  async query(cmd, _maxBytes = 8192) {
+    await this.open();
+    this.rxBuffer = '';
+    await this.write(cmd);
+
+    const deadline = Date.now() + this.timeoutMs;
+    let aggregated = '';
+    while (Date.now() < deadline) {
+      if (this.rxBuffer.length > 0) {
+        aggregated += this.rxBuffer;
+        this.rxBuffer = '';
+        if (/[\r\n]/.test(aggregated)) {
+          const out = this._normalizeReply(aggregated);
+          if (out) return out;
+        }
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await sleepMs(20);
+    }
+
+    const out = this._normalizeReply(aggregated);
+    if (out) return out;
+    const e = new Error('Timeout waiting for serial response');
+    e.code = 'FTDI_QUERY_TIMEOUT';
+    throw e;
+  }
+
+  async close() {
+    if (!this.port) return;
+    const port = this.port;
+    this.port = null;
+    this.rxBuffer = '';
+    try {
+      port.off('data', this.onData);
+    } catch (_) {
+      // ignore
+    }
+    if (!port.isOpen) return;
+    await new Promise((resolve) => {
+      port.close(() => resolve());
+    });
+  }
+}
+
 class VisaManager {
   constructor() {
     this.client = null;
@@ -461,6 +617,7 @@ class CoreDAQBackend {
     this.gpibResource = null;
     this.gpibIdn = null;
     this.gpibModel = null;
+    this.ftdiResourceMeta = new Map();
 
     this.captureState = 'idle';
     this.captureMessage = '';
@@ -1116,80 +1273,572 @@ class CoreDAQBackend {
     return series;
   }
 
+  _isFtdiResource(resource) {
+    return String(resource || '').trim().toUpperCase().startsWith(FTDI_RESOURCE_PREFIX);
+  }
+
+  _parseFtdiResource(resource) {
+    const txt = String(resource || '').trim();
+    if (!this._isFtdiResource(txt)) {
+      throw new Error('Not an FTDI resource');
+    }
+    const body = txt.slice(FTDI_RESOURCE_PREFIX.length);
+    const [pathPart, paramPart] = body.split(';', 2);
+    const portPath = String(pathPart || '').trim();
+    if (!portPath) throw new Error('Invalid FTDI resource');
+    let baud = null;
+    if (paramPart) {
+      const m = /BAUD\s*=\s*(\d+)/i.exec(paramPart);
+      if (m) {
+        const b = Number.parseInt(m[1], 10);
+        if (Number.isFinite(b) && b > 0) baud = b;
+      }
+    }
+    return { portPath, baud };
+  }
+
+  _isLikelyFtdiPort(row) {
+    const vid = String(row?.vendorId || '').trim().toLowerCase();
+    if (FTDI_VENDOR_IDS.has(vid)) return true;
+
+    const mfg = String(row?.manufacturer || '').toUpperCase();
+    if (mfg.includes('SANTEC') || mfg.includes('FTDI')) return true;
+
+    const pnp = String(row?.pnpId || '').toUpperCase();
+    if (pnp.includes('VID_0403')) return true;
+
+    return false;
+  }
+
+  async _getSerialPortDetails() {
+    try {
+      const sp = require('serialport');
+      const SerialPort = sp?.SerialPort || sp?.default || sp;
+      const rows = await SerialPort.list();
+      if (!Array.isArray(rows)) return [];
+      return rows.map((row) => ({
+        path: String(row?.path || '').trim(),
+        manufacturer: String(row?.manufacturer || '').trim(),
+        serialNumber: String(row?.serialNumber || '').trim(),
+        pnpId: String(row?.pnpId || '').trim(),
+        vendorId: String(row?.vendorId || '').trim(),
+        productId: String(row?.productId || '').trim(),
+      })).filter((row) => !!row.path);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  async _checkFtdiDriver() {
+    if (process.platform !== 'win32') {
+      return { ok: true, details: ['non-windows'] };
+    }
+    const resourcesPath = String(process.resourcesPath || '').trim();
+    const bundledDllPaths = [
+      resourcesPath ? path.join(resourcesPath, 'ftdi-driver', 'win64', 'FTD2XX64.dll') : '',
+      resourcesPath ? path.join(resourcesPath, 'ftdi-driver', 'FTD2XX64.dll') : '',
+      path.join(ROOT, 'packages', 'ftdi-driver', 'win64', 'FTD2XX64.dll'),
+      path.join(ROOT, 'ftdi-driver', 'win64', 'FTD2XX64.dll'),
+    ].filter(Boolean);
+
+    const dllPaths = [
+      'C:\\Windows\\System32\\ftd2xx.dll',
+      'C:\\Windows\\SysWOW64\\ftd2xx.dll',
+      'C:\\Windows\\System32\\ftd2xx64.dll',
+      'C:\\Windows\\SysWOW64\\ftd2xx64.dll',
+      ...bundledDllPaths,
+    ];
+    const foundDll = dllPaths.find((p) => fs.existsSync(p)) || null;
+
+    let hasService = false;
+    try {
+      const outBus = await execFileAsync('reg.exe', ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\FTDIBUS'], {
+        windowsHide: true,
+        timeout: 3000,
+      });
+      hasService = /FTDIBUS/i.test(String(outBus?.stdout || ''));
+    } catch (_) {
+      // ignore
+    }
+
+    if (!hasService) {
+      try {
+        const outSer = await execFileAsync('reg.exe', ['query', 'HKLM\\SYSTEM\\CurrentControlSet\\Services\\FTSER2'], {
+          windowsHide: true,
+          timeout: 3000,
+        });
+        hasService = /FTSER2/i.test(String(outSer?.stdout || ''));
+      } catch (_) {
+        // ignore
+      }
+    }
+
+    return {
+      ok: !!(foundDll || hasService),
+      details: [
+        foundDll ? `dll=${foundDll}` : 'dll=not-found',
+        `service=${hasService ? 'present' : 'missing'}`,
+      ],
+    };
+  }
+
+  async _openFtdiTransport(resource, opts = {}) {
+    const { portPath, baud } = this._parseFtdiResource(resource);
+    const timeoutMs = Math.max(400, Math.round(Number(opts.timeoutMs) || 1800));
+    const probeIdn = opts.probeIdn !== false;
+
+    const remembered = this.ftdiResourceMeta.get(`FTDI::${portPath}`) || this.ftdiResourceMeta.get(resource) || {};
+    const baudCandidates = [];
+    if (baud) baudCandidates.push(baud);
+    if (Number.isFinite(remembered?.baud) && remembered.baud > 0) baudCandidates.push(remembered.baud);
+    for (const b of FTDI_BAUD_CANDIDATES) baudCandidates.push(b);
+
+    const uniqueBauds = [...new Set(baudCandidates.map((b) => Math.trunc(Number(b))).filter((b) => Number.isFinite(b) && b > 0))];
+    const failures = [];
+
+    for (const candidateBaud of uniqueBauds) {
+      const transport = new SerialLaserTransport(portPath, {
+        baudRate: candidateBaud,
+        timeoutMs,
+        terminator: '\r',
+      });
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await transport.open();
+
+        let idn = '';
+        let model = null;
+        if (probeIdn) {
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            idn = await transport.query('*IDN?', 4096);
+          } catch (_) {
+            idn = '';
+          }
+          if (!idn) {
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              idn = await transport.query('IDN?', 4096);
+            } catch (_) {
+              idn = '';
+            }
+          }
+          model = detectLaserModel(idn);
+          const upper = String(idn || '').toUpperCase();
+          if (!idn || (!model && !upper.includes('SANTEC') && !upper.includes('TSL'))) {
+            throw new Error('No valid TSL IDN response');
+          }
+        }
+
+        const normalizedResource = `FTDI::${portPath}`;
+        this.ftdiResourceMeta.set(normalizedResource, {
+          baud: candidateBaud,
+          command_set: remembered?.command_set || 'legacy',
+        });
+
+        return {
+          transport,
+          resource: normalizedResource,
+          portPath,
+          baud: candidateBaud,
+          idn,
+          model,
+          command_set: remembered?.command_set || 'legacy',
+        };
+      } catch (err) {
+        failures.push(`baud=${candidateBaud}: ${String(err?.message || err)}`);
+        // eslint-disable-next-line no-await-in-loop
+        await transport.close().catch(() => {});
+      }
+    }
+
+    const e = new Error(`Unable to open FTDI resource ${portPath}: ${failures.join(' | ')}`);
+    e.code = 'FTDI_OPEN_FAILED';
+    throw e;
+  }
+
+  async _scanFtdiResourcesJs(timeoutMs = FTDI_SCAN_TIMEOUT_MAX_MS) {
+    const warnings = [];
+    const rows = [];
+    const debug = [];
+    const scanBudgetMs = Math.min(FTDI_SCAN_TIMEOUT_MAX_MS, Math.max(1500, Number(timeoutMs) || FTDI_SCAN_TIMEOUT_MAX_MS));
+    const deadlineMs = Date.now() + scanBudgetMs;
+
+    const driver = await this._checkFtdiDriver();
+    if (!driver.ok) {
+      warnings.push(`FTDI driver not detected (${driver.details.join(', ')}).`);
+    }
+
+    const details = await this._getSerialPortDetails();
+    const likely = details.filter((row) => this._isLikelyFtdiPort(row));
+
+    let candidatePorts = likely.map((row) => row.path);
+    if (candidatePorts.length === 0) {
+      candidatePorts = sortPortPaths(details.map((row) => row.path));
+    }
+    candidatePorts = sortPortPaths(candidatePorts).slice(0, 12);
+
+    for (const portPath of candidatePorts) {
+      if (Date.now() >= deadlineMs) break;
+      const resource = `FTDI::${portPath}`;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const opened = await this._openFtdiTransport(resource, {
+          timeoutMs: Math.min(1600, Math.max(700, deadlineMs - Date.now())),
+          probeIdn: true,
+        });
+        const idn = String(opened?.idn || '').trim() || null;
+        const model = opened?.model || (idn ? detectLaserModel(idn) : null);
+        this.ftdiResourceMeta.set(resource, {
+          baud: opened?.baud || null,
+          command_set: 'legacy',
+        });
+        rows.push({
+          resource,
+          idn,
+          model,
+          backend: 'ftdi-serial',
+          baud: opened?.baud || null,
+          command_set: 'legacy',
+        });
+        // eslint-disable-next-line no-await-in-loop
+        await opened.transport.close().catch(() => {});
+      } catch (err) {
+        debug.push(`${resource} probe failed: ${String(err?.code || err?.message || err)}`);
+      }
+    }
+    if (rows.length === 0) {
+      if (!driver.ok) {
+        warnings.push('No FTDI laser resources detected. Install FTDI D2XX/VCP driver and bind the laser in Device Manager (Update driver -> Browse my computer -> FTDI folder), then reconnect.');
+      } else {
+        warnings.push('No FTDI laser resources detected on serial ports. If the laser is in D2XX-only mode, switch/bind it to FTDI VCP in Device Manager or use a JS D2XX backend.');
+      }
+    }
+
+    return {
+      rows,
+      warnings,
+      debug,
+      backend: 'ftdi-serial',
+    };
+  }
+
+  async _queryFtdiJs(resource, cmd, timeoutMs = 4000) {
+    const opened = await this._openFtdiTransport(resource, {
+      timeoutMs: Math.min(2400, Math.max(700, timeoutMs)),
+      probeIdn: false,
+    });
+    try {
+      const command = String(cmd || '').trim();
+      const reply = String(await opened.transport.query(command, 8192) || '').trim();
+      let model = opened.model || null;
+      if (!model && (command.toUpperCase() === '*IDN?' || command.toUpperCase() === 'IDN?')) {
+        model = detectLaserModel(reply) || null;
+      }
+      return {
+        resource: opened.resource,
+        command,
+        reply,
+        model,
+        backend: 'ftdi-serial',
+        baud: opened.baud,
+      };
+    } finally {
+      await opened.transport.close().catch(() => {});
+    }
+  }
+
+  async _sweepFtdiJs(payload = {}, timeoutMs = 30000) {
+    const resource = String(payload?.resource || '').trim();
+    const startNm = Number(payload?.start_nm);
+    const stopNm = Number(payload?.stop_nm);
+    const powerMw = Number(payload?.power_mw);
+    const speedNmS = Number(payload?.speed_nm_s);
+    const pollIntervalMs = Math.max(100, Math.round(Number(payload?.poll_interval_ms) || 250));
+    const acquisitionWaitS = Math.max(0, Number(payload?.acquisition_wait_s) || 0);
+
+    const opened = await this._openFtdiTransport(resource, {
+      timeoutMs: Math.min(3000, Math.max(1000, timeoutMs)),
+      probeIdn: false,
+    });
+
+    try {
+      let idn = String(opened.idn || '').trim();
+      if (!idn) {
+        try {
+          idn = String(await opened.transport.query('*IDN?', 4096) || '').trim();
+        } catch (_) {
+          idn = '';
+        }
+      }
+
+      const created = createLaserFromIdn(idn, opened.transport, { commandSet: 'legacy' });
+      const laser = created.laser;
+      const model = created.model || opened.model || detectLaserModel(idn) || null;
+      await laser.configureForSweep({ startNm, stopNm, powerMw, speedNmS });
+      await laser.startSweep();
+      if (acquisitionWaitS > 0) {
+        await sleepMs(Math.round(acquisitionWaitS * 1000));
+      }
+      const sweepState = await laser.waitForSweepComplete({
+        timeoutMs: Math.max(1000, Math.round(Number(timeoutMs) || 30000)),
+        pollIntervalMs,
+      });
+
+      return {
+        resource: opened.resource,
+        idn,
+        model,
+        backend: 'ftdi-serial',
+        sweep_state: sweepState,
+        baud: opened.baud,
+      };
+    } finally {
+      await opened.transport.close().catch(() => {});
+    }
+  }
+
+  async _setFtdiWavelengthJs(payload = {}, timeoutMs = 8000) {
+    const resource = String(payload?.resource || '').trim();
+    const wavelengthNm = Number(payload?.wavelength_nm);
+
+    const opened = await this._openFtdiTransport(resource, {
+      timeoutMs: Math.min(2600, Math.max(700, timeoutMs)),
+      probeIdn: false,
+    });
+    try {
+      let idn = String(opened.idn || '').trim();
+      if (!idn) {
+        try {
+          idn = String(await opened.transport.query('*IDN?', 4096) || '').trim();
+        } catch (_) {
+          idn = '';
+        }
+      }
+
+      const created = createLaserFromIdn(idn, opened.transport, { commandSet: 'legacy' });
+      await created.laser.setWavelengthNm(wavelengthNm);
+
+      let readback = '';
+      try {
+        readback = await opened.transport.query('WA', 128);
+      } catch (_) {
+        readback = '';
+      }
+
+      return {
+        resource: opened.resource,
+        backend: 'ftdi-serial',
+        readback,
+        baud: opened.baud,
+      };
+    } finally {
+      await opened.transport.close().catch(() => {});
+    }
+  }
+
+  async _runFtdiHelper(action, payload = {}, timeoutMs = 15000) {
+    const act = String(action || '').trim().toLowerCase();
+    if (act === 'scan') {
+      const out = await this._scanFtdiResourcesJs(timeoutMs);
+      return { ok: true, ...out };
+    }
+    if (act === 'query') {
+      const out = await this._queryFtdiJs(payload?.resource, payload?.cmd || payload?.command, timeoutMs);
+      return { ok: true, ...out };
+    }
+    if (act === 'sweep') {
+      const out = await this._sweepFtdiJs(payload, timeoutMs);
+      return { ok: true, ...out };
+    }
+    if (act === 'set_wavelength') {
+      const out = await this._setFtdiWavelengthJs(payload, timeoutMs);
+      return { ok: true, ...out };
+    }
+    if (act === 'health') {
+      const driver = await this._checkFtdiDriver();
+      return {
+        ok: true,
+        backend: 'ftdi-serial',
+        driver_ok: !!driver.ok,
+        details: driver.details,
+      };
+    }
+    throw new Error(`Unsupported FTDI action: ${action}`);
+  }
+  _mergeLaserScanRows(rows) {
+    const map = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const resource = String(row?.resource || '').trim();
+      if (!resource) continue;
+      const prev = map.get(resource) || {};
+      map.set(resource, {
+        resource,
+        idn: row?.idn ?? prev.idn ?? null,
+        model: row?.model ?? prev.model ?? null,
+        backend: row?.backend ?? prev.backend ?? null,
+      });
+    }
+    return [...map.values()].sort((a, b) => a.resource.localeCompare(b.resource));
+  }
+
   async _gpibScan(opts = {}) {
     const timeoutMs = Math.max(500, Math.trunc(Number(opts.timeout_ms ?? 5000)));
     const deadlineMs = Date.now() + timeoutMs;
     const debug = [];
-    const health = await withTimeout(
-      this.visa.health(),
-      Math.max(1200, Math.min(3500, timeoutMs - 200)),
-      'GPIB_SCAN_HEALTH_TIMEOUT',
-    );
-    if (!health.enabled) {
-      const errCode = String(health?.error?.code || 'VISA_UNAVAILABLE');
-      const errMsg = String(health?.error?.message || 'VISA backend not ready');
-      const checked = Array.isArray(health?.checkedPaths) && health.checkedPaths.length > 0
-        ? ` Checked paths: ${health.checkedPaths.join(', ')}.`
-        : '';
-      throw new Error(`VISA unavailable (${errCode}): ${errMsg}.${checked}`);
-    }
-    const listBudgetMs = Math.max(800, deadlineMs - Date.now() - 200);
-    const resources = await withTimeout(
-      this.visa.listResources(),
-      listBudgetMs,
-      'GPIB_SCAN_LIST_TIMEOUT',
-    );
-    debug.push(`visa resources=${resources.length}`);
-    debug.push(`scan timeout=${timeoutMs}ms`);
-
     const rows = [];
+    const visaWarnings = [];
+    const ftdiWarnings = [];
     let timedOut = false;
-    for (const resource of resources) {
-      const remainingMs = deadlineMs - Date.now();
-      if (remainingMs <= 0) {
-        debug.push('scan deadline reached; returning partial resource list');
-        timedOut = true;
-        break;
-      }
-      let idn = null;
-      let model = null;
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        const ioTimeoutMs = Math.max(500, Math.min(2500, remainingMs - 100));
-        const transport = this.visa.open(resource, ioTimeoutMs);
+
+    const probeVisaResources = async (resources, tag = '') => {
+      debug.push(`visa resources=${resources.length}${tag}`);
+      for (const resource of resources) {
+        const remainingMs = deadlineMs - Date.now();
+        if (remainingMs <= 0) {
+          debug.push('scan deadline reached during VISA probe; returning partial list');
+          timedOut = true;
+          break;
+        }
+
+        let idn = null;
+        let model = null;
         try {
           // eslint-disable-next-line no-await-in-loop
-          idn = await withTimeout(
-            transport.query('*IDN?', 2048),
-            Math.max(400, Math.min(ioTimeoutMs + 1200, remainingMs - 50)),
-            'GPIB_SCAN_QUERY_TIMEOUT',
-          );
-          model = detectLaserModel(idn);
-        } finally {
-          // eslint-disable-next-line no-await-in-loop
-          await withTimeout(transport.close(), 1000, 'GPIB_SCAN_CLOSE_TIMEOUT').catch(() => {});
+          const ioTimeoutMs = Math.max(400, Math.min(2200, remainingMs - 100));
+          const transport = this.visa.open(resource, ioTimeoutMs);
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            idn = await withTimeout(
+              transport.query('*IDN?', 2048),
+              Math.max(350, Math.min(ioTimeoutMs + 1000, remainingMs - 50)),
+              'GPIB_SCAN_QUERY_TIMEOUT',
+            );
+            model = detectLaserModel(idn);
+          } finally {
+            // eslint-disable-next-line no-await-in-loop
+            await withTimeout(transport.close(), 1000, 'GPIB_SCAN_CLOSE_TIMEOUT').catch(() => {});
+          }
+        } catch (err) {
+          debug.push(`${resource} probe failed: ${String(err?.code || err?.message || err)}`);
         }
-      } catch (err) {
-        debug.push(`${resource} probe failed: ${String(err?.code || err?.message || err)}`);
-        idn = null;
-        model = null;
+
+        rows.push({
+          resource,
+          idn,
+          model,
+          backend: 'visa-service',
+        });
       }
-      rows.push({
-        resource,
-        idn,
-        model,
-        backend: 'visa-service',
-      });
+    };
+
+    const visaHealthBudgetMs = Math.max(1200, Math.min(7000, Math.max(1500, timeoutMs - 200)));
+    let visaHealth = null;
+    try {
+      visaHealth = await withTimeout(this.visa.health(), visaHealthBudgetMs, 'GPIB_SCAN_HEALTH_TIMEOUT');
+    } catch (err) {
+      visaHealth = {
+        enabled: false,
+        error: {
+          code: String(err?.code || 'VISA_HEALTH_ERROR'),
+          message: String(err?.message || err),
+        },
+      };
     }
 
-    return { rows, debug, timed_out: timedOut };
-  }
+    if (visaHealth?.enabled) {
+      const listBudgetMs = Math.max(600, deadlineMs - Date.now() - 300);
+      try {
+        const resources = await withTimeout(this.visa.listResources(), listBudgetMs, 'GPIB_SCAN_LIST_TIMEOUT');
+        await probeVisaResources(resources);
+      } catch (err) {
+        const msg = String(err?.message || err);
+        debug.push(`visa scan failed: ${msg}`);
+        visaWarnings.push(`NI-VISA scan failed: ${msg}`);
+      }
+    } else {
+      const errCode = String(visaHealth?.error?.code || 'VISA_UNAVAILABLE');
+      const errMsg = String(visaHealth?.error?.message || 'VISA backend not ready');
 
+      // Recover from slow service boot by trying listResources directly.
+      if (errCode === 'GPIB_SCAN_HEALTH_TIMEOUT') {
+        debug.push('visa health timed out; trying direct resource listing');
+        try {
+          const listBudgetMs = Math.max(1000, deadlineMs - Date.now() - 300);
+          const resources = await withTimeout(this.visa.listResources(), listBudgetMs, 'GPIB_SCAN_LIST_TIMEOUT');
+          await probeVisaResources(resources, ' (direct)');
+        } catch (err) {
+          const msg = String(err?.message || err);
+          debug.push(`visa direct scan failed: ${msg}`);
+          visaWarnings.push(`NI-VISA unavailable (${errCode}): ${errMsg}`);
+        }
+      } else {
+        visaWarnings.push(`NI-VISA unavailable (${errCode}): ${errMsg}`);
+      }
+
+      if (Array.isArray(visaHealth?.checkedPaths) && visaHealth.checkedPaths.length > 0) {
+        debug.push(`visa checked paths=${visaHealth.checkedPaths.join(',')}`);
+      }
+    }
+
+    try {
+      const remainingMs = Math.max(1200, Math.min(FTDI_SCAN_TIMEOUT_MAX_MS, deadlineMs - Date.now()));
+      const ftdi = await this._runFtdiHelper('scan', {}, remainingMs);
+      const ftdiRows = Array.isArray(ftdi?.rows) ? ftdi.rows : [];
+      const ftdiWarnRows = Array.isArray(ftdi?.warnings) ? ftdi.warnings : [];
+      debug.push(`ftdi resources=${ftdiRows.length}`);
+      for (const w of ftdiWarnRows) {
+        ftdiWarnings.push(String(w));
+      }
+      for (const row of ftdiRows) {
+        rows.push({
+          resource: String(row?.resource || ''),
+          idn: row?.idn ?? null,
+          model: row?.model ?? null,
+          backend: 'ftdi-serial',
+        });
+      }
+    } catch (err) {
+      ftdiWarnings.push(`FTDI serial backend unavailable: ${String(err?.message || err)}`);
+    }
+
+    const warnings = [];
+    const hasVisaRows = rows.some((r) => String(r?.backend || '') === 'visa-service');
+    const hasFtdiRows = rows.some((r) => String(r?.backend || '') === 'ftdi-serial');
+
+    if (!hasVisaRows) warnings.push(...visaWarnings);
+    if (!hasFtdiRows) warnings.push(...ftdiWarnings);
+
+    const mergedRows = this._mergeLaserScanRows(rows);
+    debug.push(`scan timeout=${timeoutMs}ms`);
+    return {
+      rows: mergedRows,
+      debug,
+      warnings,
+      timed_out: timedOut,
+      backend: 'mixed',
+    };
+  }
   async _gpibQuery(resource, cmd) {
     const res = String(resource || '').trim();
     const c = String(cmd || '').trim();
     if (!res) throw new Error('No GPIB resource selected');
     if (!c) throw new Error('Empty command');
+
+    if (this._isFtdiResource(res)) {
+      const out = await this._runFtdiHelper('query', {
+        resource: res,
+        cmd: c,
+        timeout_ms: 4000,
+      }, 9000);
+      return {
+        resource: String(out?.resource || res),
+        backend: 'ftdi-serial',
+        command: c,
+        reply: String(out?.reply || ''),
+        model: out?.model || null,
+      };
+    }
 
     const transport = this.visa.open(res, 4000);
     try {
@@ -1374,46 +2023,87 @@ class CoreDAQBackend {
 
       let gpibIdn = null;
       let gpibModel = null;
+      let laserBackend = 'visa-service';
 
-      transport = this.visa.open(res, 5000);
-      try {
-        gpibIdn = await transport.query('*IDN?', 4096);
-        gpibModel = detectLaserModel(gpibIdn);
-        if (!gpibModel) {
-          throw new Error('Unsupported laser model. Supported models: TSL550, TSL570, TSL770.');
-        }
+      if (this._isFtdiResource(res)) {
+        laserBackend = 'ftdi-serial';
+        try {
+          this.captureMessage = 'Configuring laser';
+          const sweepWaitMs = Math.round((samplesTotal / sampleRate + SWEEP_POST_START_SETTLE_S + SWEEP_FINISH_POLL_TIMEOUT_S) * 1000);
+          const sweepOut = await this._runFtdiHelper('sweep', {
+            resource: res,
+            start_nm: startNm,
+            stop_nm: stopNm,
+            power_mw: powerMw,
+            speed_nm_s: speedNmS,
+            acquisition_wait_s: (samplesTotal / sampleRate) + SWEEP_POST_START_SETTLE_S,
+            timeout_ms: sweepWaitMs,
+            poll_interval_ms: SWEEP_FINISH_POLL_INTERVAL_MS,
+          }, sweepWaitMs + 5000);
 
-        this.gpibIdn = gpibIdn;
-        this.gpibModel = gpibModel;
-        this.gpibResource = res;
+          gpibIdn = String(sweepOut?.idn || '').trim() || null;
+          gpibModel = sweepOut?.model || detectLaserModel(gpibIdn);
+          if (!gpibModel) {
+            throw new Error('Unsupported laser model. Supported models: TSL550, TSL570, TSL710, TSL770.');
+          }
 
-        ({ laser } = createLaserFromIdn(gpibIdn, transport));
+          const sweepState = sweepOut?.sweep_state || null;
+          if (sweepState && sweepState.known && sweepState.running) {
+            throw new Error(
+              `Laser sweep did not finish in time (status=${String(sweepState.raw || 'running')}).`,
+            );
+          }
 
-        this.captureMessage = 'Configuring laser';
-        await laser.configureForSweep({ startNm, stopNm, powerMw, speedNmS });
-
-        this.captureMessage = 'Waiting for laser trigger and acquisition';
-        await laser.startSweep();
-        await sleepMs(Math.round((samplesTotal / sampleRate + SWEEP_POST_START_SETTLE_S) * 1000));
-
-        this.captureMessage = 'Verifying laser sweep completion';
-        const sweepState = await laser.waitForSweepComplete({
-          timeoutMs: Math.round(SWEEP_FINISH_POLL_TIMEOUT_S * 1000),
-          pollIntervalMs: SWEEP_FINISH_POLL_INTERVAL_MS,
-        });
-        if (sweepState.known && sweepState.running) {
+          this.gpibIdn = gpibIdn;
+          this.gpibModel = gpibModel;
+          this.gpibResource = res;
+        } catch (err) {
+          const msg = String(err?.message || err);
+          if (msg.includes('Unsupported laser model')) throw err;
           throw new Error(
-            `Laser sweep did not finish in time (status=${String(sweepState.raw || 'running')}).`,
+            `Laser not found or not responding on FTDI resource "${res}". Verify FTDI driver/cabling, then re-scan.`,
           );
         }
-      } catch (err) {
-        const msg = String(err?.message || err);
-        if (msg.includes('Unsupported laser model')) throw err;
-        throw new Error(
-          `Laser not found or not responding on VISA resource "${res}". Run Scan VISA and *IDN? to verify connection.`,
-        );
-      }
+      } else {
+        transport = this.visa.open(res, 5000);
+        try {
+          gpibIdn = await transport.query('*IDN?', 4096);
+          gpibModel = detectLaserModel(gpibIdn);
+          if (!gpibModel) {
+            throw new Error('Unsupported laser model. Supported models: TSL550, TSL570, TSL710, TSL770.');
+          }
 
+          this.gpibIdn = gpibIdn;
+          this.gpibModel = gpibModel;
+          this.gpibResource = res;
+
+          ({ laser } = createLaserFromIdn(gpibIdn, transport));
+
+          this.captureMessage = 'Configuring laser';
+          await laser.configureForSweep({ startNm, stopNm, powerMw, speedNmS });
+
+          this.captureMessage = 'Waiting for laser trigger and acquisition';
+          await laser.startSweep();
+          await sleepMs(Math.round((samplesTotal / sampleRate + SWEEP_POST_START_SETTLE_S) * 1000));
+
+          this.captureMessage = 'Verifying laser sweep completion';
+          const sweepState = await laser.waitForSweepComplete({
+            timeoutMs: Math.round(SWEEP_FINISH_POLL_TIMEOUT_S * 1000),
+            pollIntervalMs: SWEEP_FINISH_POLL_INTERVAL_MS,
+          });
+          if (sweepState.known && sweepState.running) {
+            throw new Error(
+              `Laser sweep did not finish in time (status=${String(sweepState.raw || 'running')}).`,
+            );
+          }
+        } catch (err) {
+          const msg = String(err?.message || err);
+          if (msg.includes('Unsupported laser model')) throw err;
+          throw new Error(
+            `Laser not found or not responding on VISA resource "${res}". Run Scan Resources and *IDN? to verify connection.`,
+          );
+        }
+      }
       this.captureMessage = 'Transferring capture from CoreDAQ';
       const stateNow = Number(await session.dev.state_enum());
       if (stateNow !== COREDAQ_READY_STATE) {
@@ -1446,17 +2136,26 @@ class CoreDAQBackend {
         roomHumidityPct = null;
       }
 
-      if (transport) {
+      if (this._isFtdiResource(res)) {
+        try {
+          await this._runFtdiHelper('set_wavelength', {
+            resource: res,
+            wavelength_nm: returnWavelengthNm,
+          }, 8000);
+        } catch (err) {
+          this.captureMessage = `Sweep complete, but laser return failed (${String(err?.message || err)})`;
+        }
+      } else if (transport) {
         const laserReturn = await this._returnLaserToWavelength(transport, returnWavelengthNm);
         if (!laserReturn.ok) {
           this.captureMessage = `Sweep complete, but laser return failed (${String(laserReturn.reason || 'unknown')})`;
         }
       }
-
       const payload = {
         captured_at_unix: nowSec(),
         captured_at_utc: isoUtcNow(),
         resource: res,
+        laser_backend: laserBackend,
         gpib_idn: this.gpibIdn,
         gpib_model: this.gpibModel,
         device_id: session.device_id,
@@ -1892,7 +2591,9 @@ class CoreDAQBackend {
           error: null,
           resources: out.rows,
           debug: out.debug,
-          backend: 'visa-service',
+          warnings: out.warnings,
+          timed_out: !!out.timed_out,
+          backend: out.backend || 'mixed',
           node_exe: process.execPath,
         }));
         return;
@@ -2064,6 +2765,8 @@ main().catch((err) => {
   console.error('[coredaq-service-js] fatal:', err);
   process.exit(1);
 });
+
+
 
 
 

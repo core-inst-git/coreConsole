@@ -877,7 +877,7 @@ class CoreDAQ {
     }
 
     let powerLsb = CoreDAQ.ADC_LSB_MV / Math.abs(slope);
-    let pW = (Number(mv_corr) - intercept) / slope;
+    let pW = Number(mv_corr) / slope;
 
     if (this._detector_type === CoreDAQ.DETECTOR_INGAAS) {
       const corr = this._ingaas_responsivity_correction_factor();
@@ -1690,7 +1690,6 @@ class CoreDAQ {
         for (let chIdx = 0; chIdx < 4; chIdx += 1) {
           const gain = Number(gains[chIdx]);
           const slope = Number(this._fastLinearSlope[chIdx][gain]);
-          const intercept = Number(this._fastLinearIntercept[chIdx][gain]);
           const powerLsb = Number(this._fastLinearPowerLsb[chIdx][gain]);
           const decimals = Number(this._fastLinearDecimals[chIdx][gain]);
 
@@ -1705,7 +1704,7 @@ class CoreDAQ {
           for (let i = 0; i < nFrames; i += 1) {
             let mv = (Number(codes[i]) - z) * mvScale;
             if (this._mv_zero_threshold > 0.0 && Math.abs(mv) < this._mv_zero_threshold) mv = 0.0;
-            let p = (mv - intercept) / slope;
+            let p = mv / slope;
             if (corr !== 1.0) p *= corr;
             if (powerLsb > 0.0) p = Math.round(p / powerLsb) * powerLsb;
             out[i] = Number(p.toFixed(decimals));
@@ -1783,23 +1782,23 @@ class CoreDAQ {
             let mv = Number(codes[i]) * mvScale;
             if (db > 0.0 && Math.abs(mv) < db) { out[i] = 0.0; continue; }
             const v = mv / 1000.0;
-            // linear interpolation of LUT
-            let j = 0;
-            if (v <= xs[0]) j = 0;
-            else if (v >= xs[xs.length - 1]) j = xs.length - 2;
-            else {
-              // binary search
+            let y;
+            if (v <= xs[0]) {
+              y = ys[0];
+            } else if (v >= xs[xs.length - 1]) {
+              y = ys[ys.length - 1];
+            } else {
+              // linear interpolation inside LUT range
               let lo = 0; let hi = xs.length - 1;
               while (lo < hi - 1) {
                 const mid = (lo + hi) >>> 1;
                 if (xs[mid] <= v) lo = mid; else hi = mid;
               }
-              j = lo;
+              const x0 = xs[lo]; const x1 = xs[lo + 1];
+              const y0 = ys[lo]; const y1 = ys[lo + 1];
+              const t = x1 === x0 ? 0.0 : (v - x0) / (x1 - x0);
+              y = y0 + t * (y1 - y0);
             }
-            const x0 = xs[j]; const x1 = xs[j + 1];
-            const y0 = ys[j]; const y1 = ys[j + 1];
-            const t = x1 === x0 ? 0.0 : (v - x0) / (x1 - x0);
-            let y = y0 + t * (y1 - y0);
             let p = 10.0 ** y;
             if (corr !== 1.0) p *= corr;
             out[i] = Number(p.toFixed(CoreDAQ.POWER_OUTPUT_DECIMALS_MAX));
@@ -2091,6 +2090,7 @@ module.exports = {
   CoreDAQ,
   CoreDAQError,
 };
+
 
 
 
