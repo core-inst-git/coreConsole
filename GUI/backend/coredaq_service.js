@@ -1394,64 +1394,74 @@ class CoreDAQBackend {
     for (const b of FTDI_BAUD_CANDIDATES) baudCandidates.push(b);
 
     const uniqueBauds = [...new Set(baudCandidates.map((b) => Math.trunc(Number(b))).filter((b) => Number.isFinite(b) && b > 0))];
+    const rememberedTerminator = String(remembered?.terminator || '').trim();
+    const terminatorCandidates = [...new Set([
+      rememberedTerminator,
+      '\r',
+      '\n',
+      '\r\n',
+    ].filter((t) => typeof t === 'string' && t.length > 0))];
     const failures = [];
 
     for (const candidateBaud of uniqueBauds) {
-      const transport = new SerialLaserTransport(portPath, {
-        baudRate: candidateBaud,
-        timeoutMs,
-        terminator: '\r',
-      });
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        await transport.open();
+      for (const terminator of terminatorCandidates) {
+        const transport = new SerialLaserTransport(portPath, {
+          baudRate: candidateBaud,
+          timeoutMs,
+          terminator,
+        });
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          await transport.open();
 
-        let idn = '';
-        let model = null;
-        if (probeIdn) {
-          try {
-            // eslint-disable-next-line no-await-in-loop
-            idn = await transport.query('*IDN?', 4096);
-          } catch (_) {
-            idn = '';
-          }
-          if (!idn) {
+          let idn = '';
+          let model = null;
+          if (probeIdn) {
             try {
               // eslint-disable-next-line no-await-in-loop
-              idn = await transport.query('IDN?', 4096);
+              idn = await transport.query('*IDN?', 4096);
             } catch (_) {
               idn = '';
             }
+            if (!idn) {
+              try {
+                // eslint-disable-next-line no-await-in-loop
+                idn = await transport.query('IDN?', 4096);
+              } catch (_) {
+                idn = '';
+              }
+            }
+            model = detectLaserModel(idn);
+            const upper = String(idn || '').toUpperCase();
+            if (!idn || (!model && !upper.includes('SANTEC') && !upper.includes('TSL'))) {
+              throw new Error('No valid TSL IDN response');
+            }
           }
-          model = detectLaserModel(idn);
-          const upper = String(idn || '').toUpperCase();
-          if (!idn || (!model && !upper.includes('SANTEC') && !upper.includes('TSL'))) {
-            throw new Error('No valid TSL IDN response');
-          }
+
+          const normalizedResource = `FTDI::${portPath}`;
+          this.ftdiResourceMeta.set(normalizedResource, {
+            baud: candidateBaud,
+            terminator,
+            command_set: remembered?.command_set || 'legacy',
+          });
+
+          return {
+            transport,
+            resource: normalizedResource,
+            portPath,
+            baud: candidateBaud,
+            terminator,
+            idn,
+            model,
+            command_set: remembered?.command_set || 'legacy',
+          };
+        } catch (err) {
+          failures.push(`baud=${candidateBaud}, term=${JSON.stringify(terminator)}: ${String(err?.message || err)}`);
+          // eslint-disable-next-line no-await-in-loop
+          await transport.close().catch(() => {});
         }
-
-        const normalizedResource = `FTDI::${portPath}`;
-        this.ftdiResourceMeta.set(normalizedResource, {
-          baud: candidateBaud,
-          command_set: remembered?.command_set || 'legacy',
-        });
-
-        return {
-          transport,
-          resource: normalizedResource,
-          portPath,
-          baud: candidateBaud,
-          idn,
-          model,
-          command_set: remembered?.command_set || 'legacy',
-        };
-      } catch (err) {
-        failures.push(`baud=${candidateBaud}: ${String(err?.message || err)}`);
-        // eslint-disable-next-line no-await-in-loop
-        await transport.close().catch(() => {});
       }
     }
-
     const e = new Error(`Unable to open FTDI resource ${portPath}: ${failures.join(' | ')}`);
     e.code = 'FTDI_OPEN_FAILED';
     throw e;
@@ -1475,8 +1485,18 @@ class CoreDAQBackend {
     let candidatePorts = likely.map((row) => row.path);
     if (candidatePorts.length === 0) {
       candidatePorts = sortPortPaths(details.map((row) => row.path));
+      candidatePorts = candidatePorts.sort((a, b) => {
+        const ma = /^COM(\d+)$/i.exec(a);
+        const mb = /^COM(\d+)$/i.exec(b);
+        if (ma && mb) return Number(mb[1]) - Number(ma[1]);
+        if (ma) return -1;
+        if (mb) return 1;
+        return b.localeCompare(a);
+      });
+    } else {
+      candidatePorts = sortPortPaths(candidatePorts);
     }
-    candidatePorts = sortPortPaths(candidatePorts).slice(0, 12);
+    candidatePorts = candidatePorts.slice(0, 20);
 
     for (const portPath of candidatePorts) {
       if (Date.now() >= deadlineMs) break;
@@ -1491,6 +1511,7 @@ class CoreDAQBackend {
         const model = opened?.model || (idn ? detectLaserModel(idn) : null);
         this.ftdiResourceMeta.set(resource, {
           baud: opened?.baud || null,
+          terminator: opened?.terminator || '\r',
           command_set: 'legacy',
         });
         rows.push({
@@ -1499,6 +1520,7 @@ class CoreDAQBackend {
           model,
           backend: 'ftdi-serial',
           baud: opened?.baud || null,
+          terminator: opened?.terminator || '\r',
           command_set: 'legacy',
         });
         // eslint-disable-next-line no-await-in-loop
@@ -1692,46 +1714,67 @@ class CoreDAQBackend {
     let timedOut = false;
 
     const probeVisaResources = async (resources, tag = '') => {
-      debug.push(`visa resources=${resources.length}${tag}`);
-      for (const resource of resources) {
+      const normalized = [];
+      const seen = new Set();
+      for (const raw of Array.isArray(resources) ? resources : []) {
+        const resource = String(raw || '').trim();
+        if (!resource || seen.has(resource)) continue;
+        seen.add(resource);
+        normalized.push(resource);
+      }
+
+      const rowByResource = new Map();
+      for (const resource of normalized) {
+        const row = {
+          resource,
+          idn: null,
+          model: null,
+          backend: 'visa-service',
+        };
+        rows.push(row);
+        rowByResource.set(resource, row);
+      }
+
+      // Return the full VISA list first. Probe only GPIB rows for IDN/model.
+      const gpibProbeQueue = normalized
+        .filter((resource) => /^GPIB\d+::/i.test(resource))
+        .sort((a, b) => a.localeCompare(b));
+
+      debug.push(`visa resources=${normalized.length}${tag}, gpibProbe=${gpibProbeQueue.length}`);
+      for (const resource of gpibProbeQueue) {
         const remainingMs = deadlineMs - Date.now();
         if (remainingMs <= 0) {
-          debug.push('scan deadline reached during VISA probe; returning partial list');
+          debug.push('scan deadline reached during GPIB probe; returning listed VISA resources');
           timedOut = true;
           break;
         }
 
-        let idn = null;
-        let model = null;
         try {
           // eslint-disable-next-line no-await-in-loop
-          const ioTimeoutMs = Math.max(400, Math.min(2200, remainingMs - 100));
+          const ioTimeoutMs = Math.max(300, Math.min(1200, remainingMs - 40));
           const transport = this.visa.open(resource, ioTimeoutMs);
           try {
             // eslint-disable-next-line no-await-in-loop
-            idn = await withTimeout(
+            const idn = await withTimeout(
               transport.query('*IDN?', 2048),
-              Math.max(350, Math.min(ioTimeoutMs + 1000, remainingMs - 50)),
+              Math.max(300, Math.min(ioTimeoutMs + 500, remainingMs - 20)),
               'GPIB_SCAN_QUERY_TIMEOUT',
             );
-            model = detectLaserModel(idn);
+            const model = detectLaserModel(idn);
+            const row = rowByResource.get(resource);
+            if (row) {
+              row.idn = idn;
+              row.model = model;
+            }
           } finally {
             // eslint-disable-next-line no-await-in-loop
-            await withTimeout(transport.close(), 1000, 'GPIB_SCAN_CLOSE_TIMEOUT').catch(() => {});
+            await withTimeout(transport.close(), 800, 'GPIB_SCAN_CLOSE_TIMEOUT').catch(() => {});
           }
         } catch (err) {
           debug.push(`${resource} probe failed: ${String(err?.code || err?.message || err)}`);
         }
-
-        rows.push({
-          resource,
-          idn,
-          model,
-          backend: 'visa-service',
-        });
       }
     };
-
     const visaHealthBudgetMs = Math.max(1200, Math.min(7000, Math.max(1500, timeoutMs - 200)));
     let visaHealth = null;
     try {
@@ -2765,9 +2808,3 @@ main().catch((err) => {
   console.error('[coredaq-service-js] fatal:', err);
   process.exit(1);
 });
-
-
-
-
-
-
