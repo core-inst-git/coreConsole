@@ -34,3 +34,9 @@ python API/examples/example_live_stream_plot.py --sample-hz 500 --window-s 5 --f
 ```bash
 python API/examples/example_plot_saved_sweep_minimal.py
 ```
+
+## 6) Saved Sweep H5 (New Format)
+
+```bash
+python API/examples/example_plot_saved_sweep_h5.py
+```

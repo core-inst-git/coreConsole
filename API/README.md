@@ -413,31 +413,36 @@ For robust scientific workflows:
 
 ---
 
-## 19. Saved Sweep JSON: Fast Plot Workflow
+## 19. Saved Sweep H5: Fast Plot Workflow
 
-When you save from the Spectrum Analyzer tab, the backend writes a JSON sweep file (typically `*.h5.json`).
+When you save from the Spectrum Analyzer tab, the backend writes a compressed HDF5 sweep file (`*.h5`).
+
+Metadata includes:
+
+- save/capture UTC timestamps
+- `coredaq_idn`, device id, and COM port
+- room temperature and humidity
+- sweep settings (`start_nm`, `stop_nm`, `sample_rate_hz`, etc.)
 
 Minimal Python flow:
 
 1. Set `file_path`.
-2. Load JSON.
-3. Build wavelength axis from `start_nm`, `stop_nm`, and sample count.
+2. Load H5 channel data + metadata.
+3. Build wavelength axis from `start_nm` and `stop_nm`.
 4. Plot one channel.
 
 ```python
 from pathlib import Path
-import json
+import h5py
 import matplotlib.pyplot as plt
 
-file_path = Path(r"C:\path\to\coredaq_sweep_2026-03-14_120000.h5.json")
+file_path = Path(r"C:\path\to\coredaq_sweep_2026-03-14_120000.h5")
 
-with file_path.open("r", encoding="utf-8") as f:
-    doc = json.load(f)
-
-payload = doc["payload"]
-start_nm = float(payload["start_nm"])
-stop_nm = float(payload["stop_nm"])
-ch1 = payload["channels_w"][0]["data_w"]
+with h5py.File(file_path, "r") as h5:
+    ch1 = h5["/sweep/channels/ch1_w"][:]
+    meta = h5["/metadata"].attrs
+    start_nm = float(meta.get("start_nm", 0.0))
+    stop_nm = float(meta.get("stop_nm", float(len(ch1) - 1)))
 
 n = len(ch1)
 wavelength_nm = [start_nm + i * (stop_nm - start_nm) / (n - 1) for i in range(n)]
