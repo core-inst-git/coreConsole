@@ -410,3 +410,45 @@ For robust scientific workflows:
 - JS API includes `CoreDAQ.open(...)` convenience and async lifecycle.
 - Some text values in legacy outputs may contain encoding artifacts; this does not affect numeric behavior.
 
+
+---
+
+## 19. Saved Sweep JSON: Fast Plot Workflow
+
+When you save from the Spectrum Analyzer tab, the backend writes a JSON sweep file (typically `*.h5.json`).
+
+Minimal Python flow:
+
+1. Set `file_path`.
+2. Load JSON.
+3. Build wavelength axis from `start_nm`, `stop_nm`, and sample count.
+4. Plot one channel.
+
+```python
+from pathlib import Path
+import json
+import matplotlib.pyplot as plt
+
+file_path = Path(r"C:\path\to\coredaq_sweep_2026-03-14_120000.h5.json")
+
+with file_path.open("r", encoding="utf-8") as f:
+    doc = json.load(f)
+
+payload = doc["payload"]
+start_nm = float(payload["start_nm"])
+stop_nm = float(payload["stop_nm"])
+ch1 = payload["channels_w"][0]["data_w"]
+
+n = len(ch1)
+wavelength_nm = [start_nm + i * (stop_nm - start_nm) / (n - 1) for i in range(n)]
+
+plt.plot(wavelength_nm, ch1)
+plt.xlabel("Wavelength (nm)")
+plt.ylabel("Power (W)")
+plt.title("Saved Sweep - CH1")
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
+```
+
+See also: `API/examples/example_plot_saved_sweep_minimal.py`.

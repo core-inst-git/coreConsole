@@ -28,3 +28,9 @@ python API/examples/example_timer_acquisition_plot.py --frames 20000 --mask 0xF 
 ```bash
 python API/examples/example_live_stream_plot.py --sample-hz 500 --window-s 5 --freq-hz 500 --os-idx 0
 ```
+
+## 5) Saved Sweep JSON (Minimal Plot)
+
+```bash
+python API/examples/example_plot_saved_sweep_minimal.py
+```

@@ -57,6 +57,8 @@ const SWEEP_FINISH_POLL_INTERVAL_MS = 250;
 const LIVE_STREAM_TARGET_HZ = 500;
 const LIVE_STREAM_PERIOD_MS = Math.max(1, Math.round(1000 / LIVE_STREAM_TARGET_HZ));
 const STREAM_MAX_CONSEC_ERRORS = 5;
+const STREAM_SNAPSHOT_RETRIES = 1;
+const STREAM_SNAPSHOT_RETRY_DELAY_MS = 30;
 const COREDAQ_READY_STATE = 4;
 const DISCOVERY_INTERVAL_MS = 2000;
 const DISCOVERY_OPEN_RETRY_BACKOFF_MS = 3000;
@@ -1190,6 +1192,62 @@ class CoreDAQBackend {
   }
 
   async streamLoop() {
+    const normalizeStreamSnapshot = (raw) => {
+      let powerW = null;
+      let adcMv = null;
+
+      if (Array.isArray(raw) && Array.isArray(raw[0])) {
+        powerW = raw[0];
+        if (Array.isArray(raw[1])) adcMv = raw[1];
+      } else {
+        powerW = raw;
+      }
+
+      if (!Array.isArray(powerW) || powerW.length < 4) {
+        throw new Error('Invalid power snapshot payload');
+      }
+
+      const out = {
+        powerW: [0, 1, 2, 3].map((i) => Number(powerW[i] || 0)),
+        adcMv: null,
+      };
+      if (Array.isArray(adcMv) && adcMv.length >= 4) {
+        out.adcMv = [0, 1, 2, 3].map((i) => Number(adcMv[i] || 0));
+      }
+      return out;
+    };
+
+    const readStreamSnapshot = async (session, autogainEnabled) => {
+      const raw = await session.dev.snapshot_W(
+        1,
+        1.0,
+        200.0,
+        null,
+        !!autogainEnabled,
+        100.0,
+        3000.0,
+        10,
+        0.01,
+        true,
+      );
+      return normalizeStreamSnapshot(raw);
+    };
+
+    const publishStreamSnapshot = async (session, sample) => {
+      const msg = {
+        type: 'stream',
+        device_id: session.device_id,
+        frontend_type: session.frontend_type,
+        ts: nowSec(),
+        ch: sample.powerW,
+      };
+      if (Array.isArray(sample.adcMv)) {
+        msg.adc_mv = sample.adcMv;
+        msg.adc_v = sample.adcMv.map((mv) => mv / 1000.0);
+      }
+      await this.broadcast(msg);
+    };
+
     while (this.running) {
       if (!this.streamEnabledGlobal || this.devices.size === 0) {
         // eslint-disable-next-line no-await-in-loop
@@ -1201,40 +1259,56 @@ class CoreDAQBackend {
         if (!this.streamEnabledGlobal || !s.stream_enabled || s.busy) continue;
 
         try {
-          let powerW = null;
+          let sample = null;
           if (s.frontend_type === CoreDAQ.FRONTEND_LINEAR && s.autogain_enabled) {
             if ((nowSec() - s.last_autogain) > 1.0) {
               try {
                 // Reuse this snapshot for streaming to avoid duplicate USB transactions.
                 // eslint-disable-next-line no-await-in-loop
-                powerW = await s.dev.snapshot_W(1, 1.0, 200.0, null, true);
+                sample = await readStreamSnapshot(s, true);
                 s.last_autogain = nowSec();
               } catch (_) {
-                powerW = null;
+                sample = null;
               }
             }
           }
 
-          if (!powerW) {
+          if (!sample) {
             // eslint-disable-next-line no-await-in-loop
-            powerW = await s.dev.snapshot_W(1);
-          }
-          if (!Array.isArray(powerW) || powerW.length < 4) {
-            throw new Error('Invalid power snapshot payload');
+            sample = await readStreamSnapshot(s, false);
           }
 
           // eslint-disable-next-line no-await-in-loop
-          await this.broadcast({
-            type: 'stream',
-            device_id: s.device_id,
-            frontend_type: s.frontend_type,
-            ts: nowSec(),
-            ch: [0, 1, 2, 3].map((i) => Number(powerW[i] || 0)),
-          });
-
+          await publishStreamSnapshot(s, sample);
           s.stream_error_streak = 0;
         } catch (err) {
+          let recovered = false;
+          let lastErr = err;
+
+          for (let attempt = 0; attempt < STREAM_SNAPSHOT_RETRIES; attempt += 1) {
+            try {
+              // eslint-disable-next-line no-await-in-loop
+              await sleepMs(STREAM_SNAPSHOT_RETRY_DELAY_MS);
+              // eslint-disable-next-line no-await-in-loop
+              const retrySample = await readStreamSnapshot(s, false);
+              // eslint-disable-next-line no-await-in-loop
+              await publishStreamSnapshot(s, retrySample);
+              s.stream_error_streak = 0;
+              recovered = true;
+              break;
+            } catch (retryErr) {
+              lastErr = retryErr;
+            }
+          }
+
+          if (recovered) continue;
+
           s.stream_error_streak += 1;
+          if (s.stream_error_streak === 1 || s.stream_error_streak >= STREAM_MAX_CONSEC_ERRORS) {
+            console.warn(
+              '[coredaq-service] stream snapshot failed (' + s.device_id + ') streak=' + s.stream_error_streak + ': ' + String(lastErr?.message || lastErr),
+            );
+          }
           if (s.stream_error_streak >= STREAM_MAX_CONSEC_ERRORS) {
             // eslint-disable-next-line no-await-in-loop
             await this._dropSession(s.device_id);
@@ -2290,7 +2364,7 @@ class CoreDAQBackend {
         else if (math === 'db') {
           const num = Math.abs(va);
           const den = Math.abs(vb);
-          out[i] = den === 0 || num === 0 ? -120 : 20 * Math.log10(num / den);
+          out[i] = den === 0 || num === 0 ? -120 : 10 * Math.log10(num / den);
         } else out[i] = va + vb;
       }
       return {
@@ -2808,3 +2882,4 @@ main().catch((err) => {
   console.error('[coredaq-service-js] fatal:', err);
   process.exit(1);
 });
+

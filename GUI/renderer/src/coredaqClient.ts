@@ -75,6 +75,8 @@ export type StreamMsg = {
   frontend_type?: FrontendType | null;
   ts: number;
   ch: number[];
+  adc_mv?: number[];
+  adc_v?: number[];
 };
 
 export type ConsoleMsg = {

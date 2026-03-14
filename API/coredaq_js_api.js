@@ -1,4 +1,4 @@
-﻿'use strict';
+'use strict';
 
 const fs = require('fs');
 const path = require('path');
@@ -103,11 +103,11 @@ class CoreDAQ {
   static GAIN_LABELS = [
     '5 mW',
     '1 mW',
-    '500 ÂµW',
-    '100 ÂµW',
-    '50 ÂµW',
-    '10 ÂµW',
-    '5 ÂµW',
+    '500 µW',
+    '100 µW',
+    '50 µW',
+    '10 µW',
+    '5 µW',
     '500 nW',
   ];
 
@@ -1315,7 +1315,7 @@ class CoreDAQ {
     await this.ready();
 
     if (this._frontend_type === CoreDAQ.FRONTEND_LOG) {
-      const [mv] = await this.snapshot_mV(n_frames, timeout_s, poll_hz, null);
+      const [mv, gains] = await this.snapshot_mV(n_frames, timeout_s, poll_hz, null);
       const out = [];
       const db = log_deadband_mV === null ? this._log_deadband_mV : Number(log_deadband_mV);
 
@@ -1328,6 +1328,9 @@ class CoreDAQ {
         const v = mvCorr / 1000.0;
         const pW = this._convert_log_voltage_to_power_w(v);
         out.push(Number(pW.toFixed(CoreDAQ.POWER_OUTPUT_DECIMALS_MAX)));
+      }
+      if (return_debug) {
+        return [out, mv, gains];
       }
       return out;
     }

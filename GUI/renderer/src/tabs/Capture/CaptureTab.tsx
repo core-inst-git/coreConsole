@@ -615,7 +615,7 @@ export default function CaptureTab({
       if (msg.action === 'sweep_save_h5') {
         if (msg.ok) {
           const p = String(msg.path ?? '');
-          addLog(`Saved H5: ${p}`);
+          addLog(`Saved sweep JSON: ${p}`);
         } else {
           warnUser(`Save H5 error: ${String(msg.error ?? 'Unknown')}`);
         }
@@ -1189,38 +1189,3 @@ export default function CaptureTab({
     </section>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

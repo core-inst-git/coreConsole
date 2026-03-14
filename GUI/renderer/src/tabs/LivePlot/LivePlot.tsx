@@ -116,6 +116,8 @@ export default function LivePlot({
   const [seriesByChannel, setSeriesByChannel] = useState<Record<string, ChannelSeries>>({});
   const [dragId, setDragId] = useState<string | null>(null);
   const [active, setActive] = useState<ChannelDef[]>([]);
+  const [hiddenPhysicalIds, setHiddenPhysicalIds] = useState<Set<string>>(new Set());
+  const [clipByChannel, setClipByChannel] = useState<Record<string, boolean>>({});
   const [showAdd, setShowAdd] = useState(false);
   const [addType, setAddType] = useState<'physical' | 'math'>('physical');
   const [mathType, setMathType] = useState<VirtualMathType>('db');
@@ -128,10 +130,26 @@ export default function LivePlot({
   useEffect(() => {
     const physIds = new Set(physicalChannels.map((c) => c.id));
 
+    setHiddenPhysicalIds((prev) => {
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (physIds.has(id)) next.add(id);
+        else changed = true;
+      }
+      if (!changed && next.size === prev.size) {
+        return prev;
+      }
+      return next;
+    });
+
     setActive((prev) => {
-      const kept = prev.filter((c) => c.type === 'math' || physIds.has(c.id));
+      const kept = prev.filter(
+        (c) => c.type === 'math' || (physIds.has(c.id) && !hiddenPhysicalIds.has(c.id))
+      );
       const existingPhysical = new Set(kept.filter((c) => c.type === 'physical').map((c) => c.id));
       for (const p of physicalChannels) {
+        if (hiddenPhysicalIds.has(p.id)) continue;
         if (!existingPhysical.has(p.id)) kept.push({ ...p });
       }
       return kept;
@@ -145,13 +163,21 @@ export default function LivePlot({
       return next;
     });
 
+    setClipByChannel((prev) => {
+      const next: Record<string, boolean> = {};
+      for (const p of physicalChannels) {
+        next[p.id] = !!prev[p.id];
+      }
+      return next;
+    });
+
     setSrcA((prev) => (prev && physIds.has(prev) ? prev : physicalChannels[0]?.id || ''));
     setSrcB((prev) => {
       if (prev && physIds.has(prev)) return prev;
       if (physicalChannels.length > 1) return physicalChannels[1].id;
       return physicalChannels[0]?.id || '';
     });
-  }, [physicalChannels]);
+  }, [physicalChannels, hiddenPhysicalIds]);
 
   useEffect(() => {
     const virtualDefs: ChannelDef[] = virtualChannels.map((v) => ({
@@ -206,6 +232,17 @@ export default function LivePlot({
         }
         return touched ? next : prev;
       });
+
+      if (Array.isArray(msg.adc_mv) && msg.adc_mv.length >= 4) {
+        setClipByChannel((prev) => {
+          const next = { ...prev };
+          for (let i = 0; i < 4; i += 1) {
+            const key = physicalChannelId(msg.device_id as string, i);
+            next[key] = Number(msg.adc_mv[i]) > 4500;
+          }
+          return next;
+        });
+      }
     });
     return () => unsub();
   }, [maxPoints, windowSeconds]);
@@ -239,12 +276,15 @@ export default function LivePlot({
         ? 1100
         : 1700;
   const [wavelengthInput, setWavelengthInput] = useState('');
+  const [wavelengthEditing, setWavelengthEditing] = useState(false);
 
   useEffect(() => {
+    if (wavelengthEditing) return;
     setWavelengthInput(formatWavelengthInput(wavelengthNm));
-  }, [activeDevice?.device_id, wavelengthNm]);
+  }, [activeDevice?.device_id, wavelengthNm, wavelengthEditing]);
 
   const applyWavelength = () => {
+    setWavelengthEditing(false);
     if (!activeDevice) return;
     const parsed = Number(wavelengthInput);
     if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -257,11 +297,6 @@ export default function LivePlot({
       wavelength_nm: parsed,
     });
   };
-
-  useEffect(() => {
-    if (!activeDevice) return;
-    sendControl({ action: 'set_freq', device_id: activeDevice.device_id, freq_hz: 500 });
-  }, [activeDevice?.device_id]);
 
   const updateGain = (idx: number, val: number) => {
     if (!activeDevice || !activeIsLinear) return;
@@ -347,6 +382,13 @@ export default function LivePlot({
       if (target?.type === 'math' && target.virtualId) {
         onRemoveVirtualChannel(target.virtualId);
       }
+      if (target?.type === 'physical') {
+        setHiddenPhysicalIds((hidden) => {
+          const next = new Set(hidden);
+          next.add(id);
+          return next;
+        });
+      }
       return prev.filter((c) => c.id !== id);
     });
   };
@@ -354,7 +396,12 @@ export default function LivePlot({
   const addPhysical = (id: string) => {
     const def = physicalChannels.find((c) => c.id === id);
     if (!def) return;
-    setActive((prev) => [...prev, { ...def }]);
+    setHiddenPhysicalIds((hidden) => {
+      const next = new Set(hidden);
+      next.delete(id);
+      return next;
+    });
+    setActive((prev) => (prev.some((c) => c.id === id) ? prev : [...prev, { ...def }]));
   };
 
   const addMath = () => {
@@ -445,15 +492,21 @@ export default function LivePlot({
                   <span className="legend-dot" style={{ background: ch.color }} />
                   {ch.name}
                   <span className="drag-hint">drag</span>
+                  {ch.type === 'physical' && clipByChannel[ch.id] ? (
+                    <span className="clip-pill" title="ADC high-side clipping detected (>4.5 V)">
+                      CLIP
+                    </span>
+                  ) : null}
                   <button
                     className="icon-btn"
+                    type="button"
                     onClick={(e) => {
                       e.stopPropagation();
                       removeChannel(ch.id);
                     }}
                     title="Close"
                   >
-                    Ã—
+                    x
                   </button>
                 </div>
                 <LiveChart
@@ -472,7 +525,7 @@ export default function LivePlot({
             <div className="panel-title">Device Control</div>
             <div className="panel-meta">
               {activeDevice
-                ? `${activeDevice.device_id} â€¢ ${activeDevice.frontend_type || 'UNKNOWN'} â€¢ ${detectorType}`
+                ? `${activeDevice.device_id} | ${activeDevice.frontend_type || 'UNKNOWN'} | ${detectorType}`
                 : 'No active device'}
             </div>
           </div>
@@ -578,7 +631,11 @@ export default function LivePlot({
                   min={wavelengthMinNm}
                   max={wavelengthMaxNm}
                   value={wavelengthInput}
-                  onChange={(e) => setWavelengthInput(e.target.value)}
+                  onChange={(e) => {
+                    setWavelengthEditing(true);
+                    setWavelengthInput(e.target.value);
+                  }}
+                  onFocus={() => setWavelengthEditing(true)}
                   onBlur={applyWavelength}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
@@ -593,7 +650,7 @@ export default function LivePlot({
             </div>
             <div className="stat-hint">
               Range {Math.round(wavelengthMinNm)}-{Math.round(wavelengthMaxNm)} nm
-              {' â€¢ '}
+              {' | '}
               default 1550 nm
             </div>
           </div>
@@ -756,4 +813,3 @@ export default function LivePlot({
     </section>
   );
 }
-
