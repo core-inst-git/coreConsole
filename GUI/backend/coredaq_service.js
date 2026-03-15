@@ -69,9 +69,19 @@ const MANUAL_CONNECT_PROBE_TIMEOUT_MS = 1000;
 
 const WS_HOST = '127.0.0.1';
 const FTDI_RESOURCE_PREFIX = 'FTDI::';
+const USBRAW_RESOURCE_PREFIX = 'USBRAW::';
 const FTDI_VENDOR_IDS = new Set(['0403']);
 const FTDI_BAUD_CANDIDATES = [9600, 19200, 38400, 57600, 115200];
 const FTDI_SCAN_TIMEOUT_MAX_MS = 5000;
+const USBRAW_SCAN_TIMEOUT_MAX_MS = 5000;
+const USBRAW_READ_PACKET_BYTES = 64;
+const USBRAW_TERMINATOR_CANDIDATES = ['\r\n', '\r'];
+const VISIBLE_USB_DEVICE_IDS = [
+  { vid: 0x104d, pid: 0x100a, model: 'TLB6700' },
+];
+const VISIBLE_SWEEP_POINTS_DEFAULT = 201;
+const VISIBLE_SWEEP_SETTLE_MS_DEFAULT = 500;
+const VISIBLE_SWEEP_AVG_MS_DEFAULT = 100;
 
 function sleepMs(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms | 0)));
@@ -230,6 +240,58 @@ function activeChannelIndices(mask) {
 
 function isoUtcNow() {
   return new Date().toISOString();
+}
+
+function formatUsbHex(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '0000';
+  return Math.max(0, Math.trunc(n)).toString(16).toUpperCase().padStart(4, '0');
+}
+
+function visibleUsbProfileForIds(vid, pid) {
+  const v = Math.max(0, Math.trunc(Number(vid) || 0));
+  const p = Math.max(0, Math.trunc(Number(pid) || 0));
+  return VISIBLE_USB_DEVICE_IDS.find((row) => row.vid === v && row.pid === p) || null;
+}
+
+function buildUsbRawResource(locator = {}) {
+  const parts = [
+    `VID=${formatUsbHex(locator.vid)}`,
+    `PID=${formatUsbHex(locator.pid)}`,
+  ];
+  const serial = String(locator.serial || '').trim();
+  if (serial) {
+    parts.push(`SERIAL=${serial}`);
+  } else {
+    if (Number.isFinite(Number(locator.bus))) parts.push(`BUS=${Math.trunc(Number(locator.bus))}`);
+    if (Number.isFinite(Number(locator.address))) parts.push(`ADDR=${Math.trunc(Number(locator.address))}`);
+  }
+  return `${USBRAW_RESOURCE_PREFIX}${parts.join(';')}`;
+}
+
+function parseUsbRawResource(resource) {
+  const txt = String(resource || '').trim();
+  if (!txt.toUpperCase().startsWith(USBRAW_RESOURCE_PREFIX)) {
+    throw new Error('Not a USB raw resource');
+  }
+  const body = txt.slice(USBRAW_RESOURCE_PREFIX.length);
+  const out = {};
+  for (const token of body.split(';')) {
+    const [key, value] = String(token || '').split('=', 2);
+    const k = String(key || '').trim().toUpperCase();
+    const v = String(value || '').trim();
+    if (!k || !v) continue;
+    if (k === 'VID' || k === 'PID') out[k] = Number.parseInt(v, 16);
+    else if (k === 'BUS' || k === 'ADDR') out[k] = Number.parseInt(v, 10);
+    else out[k] = v;
+  }
+  return {
+    vid: Number.isFinite(out.VID) ? out.VID : null,
+    pid: Number.isFinite(out.PID) ? out.PID : null,
+    serial: String(out.SERIAL || '').trim() || null,
+    bus: Number.isFinite(out.BUS) ? out.BUS : null,
+    address: Number.isFinite(out.ADDR) ? out.ADDR : null,
+  };
 }
 
 function sortPortPaths(paths) {
@@ -522,6 +584,200 @@ class SerialLaserTransport {
   }
 }
 
+class UsbRawLaserTransport {
+  constructor(locator, { timeoutMs = 2000, terminator = '\r\n' } = {}) {
+    this.locator = {
+      vid: Number(locator?.vid) || 0,
+      pid: Number(locator?.pid) || 0,
+      serial: String(locator?.serial || '').trim() || null,
+      bus: Number.isFinite(Number(locator?.bus)) ? Math.trunc(Number(locator.bus)) : null,
+      address: Number.isFinite(Number(locator?.address)) ? Math.trunc(Number(locator.address)) : null,
+    };
+    this.timeoutMs = Math.max(100, Number(timeoutMs) || 2000);
+    this.terminator = String(terminator || '\r\n');
+    this.device = null;
+    this.iface = null;
+    this.inEndpoint = null;
+    this.outEndpoint = null;
+    this.claimed = false;
+  }
+
+  _loadUsbModule() {
+    return require('usb');
+  }
+
+  _getDeviceList(mod) {
+    if (typeof mod?.getDeviceList === 'function') return mod.getDeviceList();
+    if (typeof mod?.usb?.getDeviceList === 'function') return mod.usb.getDeviceList();
+    throw new Error('usb.getDeviceList() is unavailable');
+  }
+
+  async _findDevice() {
+    const mod = this._loadUsbModule();
+    const { vid, pid, serial, bus, address } = this.locator;
+
+    if (serial && typeof mod?.findBySerialNumber === 'function') {
+      try {
+        const bySerial = await mod.findBySerialNumber(serial);
+        if (bySerial) {
+          const desc = bySerial.deviceDescriptor || {};
+          if ((!vid || desc.idVendor === vid) && (!pid || desc.idProduct === pid)) {
+            return bySerial;
+          }
+        }
+      } catch (_) {
+        // fall through to manual search
+      }
+    }
+
+    const devices = this._getDeviceList(mod);
+    for (const device of Array.isArray(devices) ? devices : []) {
+      const desc = device?.deviceDescriptor || {};
+      if (vid && desc.idVendor !== vid) continue;
+      if (pid && desc.idProduct !== pid) continue;
+      if (bus != null && Number(device?.busNumber) !== bus) continue;
+      if (address != null && Number(device?.deviceAddress) !== address) continue;
+      return device;
+    }
+
+    throw new Error('Matching USB raw laser resource is no longer present');
+  }
+
+  _pickInterface(device) {
+    const interfaces = Array.isArray(device?.interfaces) ? device.interfaces : [];
+    for (const iface of interfaces) {
+      const endpoints = Array.isArray(iface?.endpoints) ? iface.endpoints : [];
+      const inEp = endpoints.find((ep) => ep?.direction === 'in');
+      const outEp = endpoints.find((ep) => ep?.direction === 'out');
+      if (inEp && outEp) return { iface, inEp, outEp };
+    }
+    throw new Error('No usable USB bulk endpoints found on laser controller');
+  }
+
+  async open() {
+    if (this.device && this.inEndpoint && this.outEndpoint) return;
+    const device = await this._findDevice();
+    try {
+      device.open();
+      if (typeof device.setAutoDetachKernelDriver === 'function' && process.platform !== 'win32') {
+        try { device.setAutoDetachKernelDriver(true); } catch (_) { /* ignore */ }
+      }
+      const picked = this._pickInterface(device);
+      this.iface = picked.iface;
+      this.inEndpoint = picked.inEp;
+      this.outEndpoint = picked.outEp;
+      this.inEndpoint.timeout = this.timeoutMs;
+      this.outEndpoint.timeout = this.timeoutMs;
+      if (process.platform !== 'win32' && typeof this.iface.isKernelDriverActive === 'function') {
+        try {
+          if (this.iface.isKernelDriverActive()) this.iface.detachKernelDriver();
+        } catch (_) {
+          // ignore
+        }
+      }
+      this.iface.claim();
+      this.claimed = true;
+      this.device = device;
+    } catch (err) {
+      try { device.close(); } catch (_) { /* ignore */ }
+      const msg = String(err?.message || err);
+      if (msg.includes('LIBUSB_ERROR_NOT_SUPPORTED')) {
+        throw new Error('USB raw backend not supported by current Windows driver. Bind the controller to WinUSB/libusb or use UsbDK.');
+      }
+      throw err;
+    }
+  }
+
+  _normalizeReply(raw) {
+    const txt = Buffer.isBuffer(raw) ? raw.toString('ascii') : String(raw || '');
+        const clean = txt.replace(/\x00/g, '');
+    const lines = clean.split(/[\r\n]+/g).map((line) => line.trim()).filter(Boolean);
+    if (lines.length > 0) return lines[0];
+    return clean.trim();
+  }
+
+  _lineWithTerminator(cmd) {
+    let line = String(cmd || '').trim();
+    if (!line) throw new Error('Empty command');
+    if (!line.endsWith(this.terminator)) line = `${line}${this.terminator}`;
+    return line;
+  }
+
+  async _writeBuffer(buffer) {
+    await this.open();
+    await this.outEndpoint.transferAsync(Buffer.from(buffer));
+  }
+
+  async _readReply() {
+    await this.open();
+    const deadline = Date.now() + this.timeoutMs;
+    let aggregated = Buffer.alloc(0);
+    while (Date.now() < deadline) {
+      const remaining = Math.max(20, deadline - Date.now());
+      this.inEndpoint.timeout = remaining;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const chunk = await this.inEndpoint.transferAsync(USBRAW_READ_PACKET_BYTES);
+        if (chunk && chunk.length) {
+          aggregated = Buffer.concat([aggregated, chunk]);
+          const normalized = this._normalizeReply(aggregated);
+          if (/[\r\n]/.test(chunk.toString('ascii')) || normalized) {
+            if (normalized) return normalized;
+          }
+        }
+      } catch (err) {
+        const msg = String(err?.message || err);
+        if (msg.includes('timed out') || msg.includes('LIBUSB_TRANSFER_TIMED_OUT')) {
+          break;
+        }
+        throw err;
+      }
+    }
+    const out = this._normalizeReply(aggregated);
+    if (out) return out;
+    const e = new Error('Timeout waiting for USB raw response');
+    e.code = 'USBRAW_QUERY_TIMEOUT';
+    throw e;
+  }
+
+  async write(cmd) {
+    const line = this._lineWithTerminator(cmd);
+    await this._writeBuffer(Buffer.from(line, 'ascii'));
+    const reply = await this._readReply();
+    const upper = String(reply || '').toUpperCase();
+    if (upper.includes('ERR') || upper.includes('ERROR') || upper.includes('OUT OF RANGE') || upper.includes('INVALID')) {
+      throw new Error(String(reply));
+    }
+  }
+
+  async query(cmd) {
+    const line = this._lineWithTerminator(cmd);
+    await this._writeBuffer(Buffer.from(line, 'ascii'));
+    return this._readReply();
+  }
+
+  async close() {
+    const iface = this.iface;
+    const device = this.device;
+    this.iface = null;
+    this.device = null;
+    this.inEndpoint = null;
+    this.outEndpoint = null;
+    const claimed = this.claimed;
+    this.claimed = false;
+    if (iface && claimed) {
+      try {
+        await iface.releaseAsync(true).catch(() => {});
+      } catch (_) {
+        // ignore
+      }
+    }
+    if (device) {
+      try { device.close(); } catch (_) { /* ignore */ }
+    }
+  }
+}
+
 class VisaManager {
   constructor() {
     this.client = null;
@@ -621,6 +877,7 @@ class CoreDAQBackend {
     this.gpibIdn = null;
     this.gpibModel = null;
     this.ftdiResourceMeta = new Map();
+    this.usbRawResourceMeta = new Map();
 
     this.captureState = 'idle';
     this.captureMessage = '';
@@ -1332,12 +1589,18 @@ class CoreDAQBackend {
       return Number(startNm) + span * (t / durationS);
     });
 
+    return this._buildSweepSeriesFromAxis(channelsW, xPreview, idx);
+  }
+
+  _buildSweepSeriesFromAxis(channelsW, xAxisNm, sampleIndices = null) {
+    const xVals = Array.isArray(xAxisNm) ? xAxisNm : [];
+    const idx = Array.isArray(sampleIndices) ? sampleIndices : decimateIndices(xVals.length, xVals.length);
     const colors = ['#4DD0E1', '#FFB454', '#7BE7A1', '#FF7AA2'];
     const series = [];
 
     for (let ch = 0; ch < 4; ch += 1) {
       const y = Array.isArray(channelsW[ch]) ? channelsW[ch] : [];
-      const data = idx.map((sampleIdx, k) => [xPreview[k], Number(y[sampleIdx] || 0)]);
+      const data = idx.map((sampleIdx, k) => [Number(xVals[k] ?? xVals[sampleIdx] ?? 0), Number(y[sampleIdx] || 0)]);
       series.push({
         name: `CH${ch + 1}`,
         color: colors[ch],
@@ -1350,6 +1613,14 @@ class CoreDAQBackend {
 
   _isFtdiResource(resource) {
     return String(resource || '').trim().toUpperCase().startsWith(FTDI_RESOURCE_PREFIX);
+  }
+
+  _isUsbRawResource(resource) {
+    return String(resource || '').trim().toUpperCase().startsWith(USBRAW_RESOURCE_PREFIX);
+  }
+
+  _parseUsbRawResource(resource) {
+    return parseUsbRawResource(resource);
   }
 
   _parseFtdiResource(resource) {
@@ -1401,6 +1672,216 @@ class CoreDAQBackend {
       })).filter((row) => !!row.path);
     } catch (_) {
       return [];
+    }
+  }
+
+  _loadUsbModule() {
+    return require('usb');
+  }
+
+  _getUsbDeviceList() {
+    const mod = this._loadUsbModule();
+    if (typeof mod?.getDeviceList === 'function') return mod.getDeviceList();
+    if (typeof mod?.usb?.getDeviceList === 'function') return mod.usb.getDeviceList();
+    throw new Error('usb.getDeviceList() is unavailable');
+  }
+
+  async _getUsbStringDescriptor(device, index) {
+    if (!device || !(Number(index) > 0)) return '';
+    const wasOpen = !!device.interfaces;
+    try {
+      if (!wasOpen) device.open();
+      const value = await new Promise((resolve, reject) => {
+        device.getStringDescriptor(index, (error, out) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve(String(out || ''));
+        });
+      });
+      return String(value || '').trim();
+    } catch (_) {
+      return '';
+    } finally {
+      if (!wasOpen) {
+        try { device.close(); } catch (_) { /* ignore */ }
+      }
+    }
+  }
+
+  async _describeVisibleUsbDevice(device) {
+    const desc = device?.deviceDescriptor || {};
+    const vid = Number(desc.idVendor || 0);
+    const pid = Number(desc.idProduct || 0);
+    const profile = visibleUsbProfileForIds(vid, pid);
+    if (!profile) return null;
+
+    const serial = await this._getUsbStringDescriptor(device, desc.iSerialNumber);
+    const manufacturer = await this._getUsbStringDescriptor(device, desc.iManufacturer);
+    const product = await this._getUsbStringDescriptor(device, desc.iProduct);
+    const bus = Number(device?.busNumber || 0);
+    const address = Number(device?.deviceAddress || 0);
+    const resource = buildUsbRawResource({ vid, pid, serial, bus, address });
+
+    return {
+      resource,
+      vid,
+      pid,
+      serial,
+      bus,
+      address,
+      manufacturer,
+      product,
+      model: profile.model,
+    };
+  }
+
+  async _openUsbRawTransport(resource, opts = {}) {
+    const locator = this._parseUsbRawResource(resource);
+    const timeoutMs = Math.max(400, Math.round(Number(opts.timeoutMs) || 2200));
+    const probeIdn = opts.probeIdn !== false;
+    const remembered = this.usbRawResourceMeta.get(resource) || {};
+    const terminators = [...new Set([
+      String(remembered?.terminator || '').trim(),
+      ...USBRAW_TERMINATOR_CANDIDATES,
+    ].filter((v) => typeof v === 'string' && v.length > 0))];
+    const failures = [];
+
+    for (const terminator of terminators) {
+      const transport = new UsbRawLaserTransport(locator, { timeoutMs, terminator });
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await transport.open();
+        let idn = '';
+        let model = visibleUsbProfileForIds(locator.vid, locator.pid)?.model || null;
+        if (probeIdn) {
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            idn = String(await transport.query('*IDN?') || '').trim();
+          } catch (_) {
+            idn = '';
+          }
+          if (idn) {
+            model = detectLaserModel(idn) || model;
+          }
+        }
+
+        this.usbRawResourceMeta.set(resource, {
+          terminator,
+          vid: locator.vid,
+          pid: locator.pid,
+          serial: locator.serial,
+          bus: locator.bus,
+          address: locator.address,
+          model,
+        });
+
+        return {
+          transport,
+          resource,
+          terminator,
+          idn,
+          model,
+        };
+      } catch (err) {
+        failures.push(`term=${JSON.stringify(terminator)}: ${String(err?.message || err)}`);
+        // eslint-disable-next-line no-await-in-loop
+        await transport.close().catch(() => {});
+      }
+    }
+
+    const e = new Error(`Unable to open USB raw resource ${resource}: ${failures.join(' | ')}`);
+    e.code = 'USBRAW_OPEN_FAILED';
+    throw e;
+  }
+
+  async _scanUsbRawVisibleResources(timeoutMs = USBRAW_SCAN_TIMEOUT_MAX_MS) {
+    const rows = [];
+    const warnings = [];
+    const debug = [];
+    const deadlineMs = Date.now() + Math.max(1000, Math.min(USBRAW_SCAN_TIMEOUT_MAX_MS, Number(timeoutMs) || USBRAW_SCAN_TIMEOUT_MAX_MS));
+
+    let devices = [];
+    try {
+      devices = this._getUsbDeviceList();
+    } catch (err) {
+      warnings.push(`USB raw laser backend unavailable: ${String(err?.message || err)}`);
+      return { rows, warnings, debug, backend: 'usb-raw' };
+    }
+
+    const candidates = [];
+    for (const device of Array.isArray(devices) ? devices : []) {
+      const desc = device?.deviceDescriptor || {};
+      if (visibleUsbProfileForIds(desc.idVendor, desc.idProduct)) candidates.push(device);
+    }
+    debug.push(`usbraw candidates=${candidates.length}`);
+
+    for (const device of candidates) {
+      if (Date.now() >= deadlineMs) break;
+      // eslint-disable-next-line no-await-in-loop
+      const info = await this._describeVisibleUsbDevice(device);
+      if (!info) continue;
+
+      let idn = null;
+      let model = info.model || null;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const opened = await this._openUsbRawTransport(info.resource, {
+          timeoutMs: Math.max(800, Math.min(2400, deadlineMs - Date.now())),
+          probeIdn: false,
+        });
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          idn = String(await opened.transport.query('*IDN?') || '').trim() || null;
+          if (idn) model = detectLaserModel(idn) || model;
+        } finally {
+          // eslint-disable-next-line no-await-in-loop
+          await opened.transport.close().catch(() => {});
+        }
+      } catch (err) {
+        debug.push(`${info.resource} probe failed: ${String(err?.code || err?.message || err)}`);
+      }
+
+      rows.push({
+        resource: info.resource,
+        idn,
+        model: model || info.model || null,
+        backend: 'usb-raw',
+      });
+    }
+
+    return {
+      rows,
+      warnings,
+      debug,
+      backend: 'usb-raw',
+    };
+  }
+
+  async _queryUsbRawJs(resource, cmd, timeoutMs = 4000) {
+    const opened = await this._openUsbRawTransport(resource, {
+      timeoutMs: Math.min(2600, Math.max(700, timeoutMs)),
+      probeIdn: false,
+    });
+    try {
+      const command = String(cmd || '').trim();
+      let reply = 'OK';
+      if (command.endsWith('?')) reply = String(await opened.transport.query(command) || '').trim();
+      else await opened.transport.write(command);
+      let model = opened.model || null;
+      if (!model && (command.toUpperCase() === '*IDN?' || command.toUpperCase() === 'IDN?')) {
+        model = detectLaserModel(reply) || null;
+      }
+      return {
+        resource: opened.resource,
+        command,
+        reply,
+        model,
+        backend: 'usb-raw',
+      };
+    } finally {
+      await opened.transport.close().catch(() => {});
     }
   }
 
@@ -1786,6 +2267,7 @@ class CoreDAQBackend {
     const rows = [];
     const visaWarnings = [];
     const ftdiWarnings = [];
+    const usbWarnings = [];
     let timedOut = false;
 
     const probeVisaResources = async (resources, tag = '') => {
@@ -1810,7 +2292,6 @@ class CoreDAQBackend {
         rowByResource.set(resource, row);
       }
 
-      // Return the full VISA list first. Probe only GPIB rows for IDN/model.
       const gpibProbeQueue = normalized
         .filter((resource) => /^GPIB\d+::/i.test(resource))
         .sort((a, b) => a.localeCompare(b));
@@ -1878,7 +2359,6 @@ class CoreDAQBackend {
       const errCode = String(visaHealth?.error?.code || 'VISA_UNAVAILABLE');
       const errMsg = String(visaHealth?.error?.message || 'VISA backend not ready');
 
-      // Recover from slow service boot by trying listResources directly.
       if (errCode === 'GPIB_SCAN_HEALTH_TIMEOUT') {
         debug.push('visa health timed out; trying direct resource listing');
         try {
@@ -1920,12 +2400,33 @@ class CoreDAQBackend {
       ftdiWarnings.push(`FTDI serial backend unavailable: ${String(err?.message || err)}`);
     }
 
+    try {
+      const remainingMs = Math.max(800, Math.min(USBRAW_SCAN_TIMEOUT_MAX_MS, deadlineMs - Date.now()));
+      const usbOut = await this._scanUsbRawVisibleResources(remainingMs);
+      debug.push(...(Array.isArray(usbOut?.debug) ? usbOut.debug : []));
+      for (const warning of Array.isArray(usbOut?.warnings) ? usbOut.warnings : []) {
+        usbWarnings.push(String(warning));
+      }
+      for (const row of Array.isArray(usbOut?.rows) ? usbOut.rows : []) {
+        rows.push({
+          resource: String(row?.resource || ''),
+          idn: row?.idn ?? null,
+          model: row?.model ?? null,
+          backend: 'usb-raw',
+        });
+      }
+    } catch (err) {
+      usbWarnings.push(`USB raw visible backend unavailable: ${String(err?.message || err)}`);
+    }
+
     const warnings = [];
     const hasVisaRows = rows.some((r) => String(r?.backend || '') === 'visa-service');
     const hasFtdiRows = rows.some((r) => String(r?.backend || '') === 'ftdi-serial');
+    const hasUsbRows = rows.some((r) => String(r?.backend || '') === 'usb-raw');
 
     if (!hasVisaRows) warnings.push(...visaWarnings);
     if (!hasFtdiRows) warnings.push(...ftdiWarnings);
+    if (!hasUsbRows) warnings.push(...usbWarnings);
 
     const mergedRows = this._mergeLaserScanRows(rows);
     debug.push(`scan timeout=${timeoutMs}ms`);
@@ -1937,11 +2438,16 @@ class CoreDAQBackend {
       backend: 'mixed',
     };
   }
+
   async _gpibQuery(resource, cmd) {
     const res = String(resource || '').trim();
     const c = String(cmd || '').trim();
     if (!res) throw new Error('No GPIB resource selected');
     if (!c) throw new Error('Empty command');
+
+    if (this._isUsbRawResource(res)) {
+      return this._queryUsbRawJs(res, c, 4000);
+    }
 
     if (this._isFtdiResource(res)) {
       const out = await this._runFtdiHelper('query', {
@@ -1978,6 +2484,7 @@ class CoreDAQBackend {
       await transport.close();
     }
   }
+
   async _returnLaserToWavelength(transport, wavelengthNm) {
     const wl = Number(wavelengthNm);
     if (!Number.isFinite(wl) || wl <= 0) return { ok: false, reason: 'invalid_wavelength' };
@@ -2029,9 +2536,297 @@ class CoreDAQBackend {
     return { ok: false, reason: errors.join(' | ') || 'unknown' };
   }
 
+  async _runVisibleStepSweepCapture(session, resource, params) {
+    const res = String(resource || '').trim();
+    if (!res) throw new Error('No laser resource selected');
+    if (session.busy) throw new Error('Selected device is busy');
+    if (!this._isUsbRawResource(res)) {
+      throw new Error('Visible step sweep requires a USB raw laser resource');
+    }
+
+    const startNm = Number(params.start_nm ?? 770.0);
+    const stopNm = Number(params.stop_nm ?? 780.0);
+    const powerMw = Number(params.power_mw ?? 1.0);
+    const returnWavelengthNm = Number(params.return_wavelength_nm ?? startNm);
+    const pointCount = Math.max(1, Math.trunc(Number(params.point_count ?? VISIBLE_SWEEP_POINTS_DEFAULT)));
+    const stepSettleMs = Math.max(0, Math.round(Number(params.step_settle_ms ?? VISIBLE_SWEEP_SETTLE_MS_DEFAULT)));
+    const averageMs = Math.max(1, Math.round(Number(params.average_ms ?? VISIBLE_SWEEP_AVG_MS_DEFAULT)));
+    let sampleRate = Math.trunc(Number(params.sample_rate_hz ?? SWEEP_SAMPLE_RATE_DEFAULT_HZ));
+    const osIdxRequested = Math.max(0, Math.min(7, Math.trunc(Number(params.os_idx ?? session.default_os_idx))));
+    const channelMask = (Math.trunc(Number(params.channel_mask ?? 0x0f)) & 0x0f) || 0x0f;
+    const saveChannelMaskRaw = params.save_channel_mask;
+    let saveChannelMask = null;
+    if (saveChannelMaskRaw !== undefined && saveChannelMaskRaw !== null && saveChannelMaskRaw !== '') {
+      const v = Math.trunc(Number(saveChannelMaskRaw));
+      if (Number.isFinite(v)) saveChannelMask = v & 0x0f;
+    }
+    if (saveChannelMask == null) saveChannelMask = channelMask;
+    const previewPoints = Math.trunc(Number(params.preview_points ?? 24000));
+
+    const gainsIn = Array.isArray(params.gains) ? params.gains : [0, 0, 0, 0];
+    const gains = [0, 1, 2, 3].map((i) => {
+      const g = Number.parseInt(String(gainsIn[i] ?? 0), 10);
+      if (!Number.isFinite(g)) return 0;
+      return Math.max(0, Math.min(7, g));
+    });
+
+    if (!(sampleRate > 0)) throw new Error('Sample rate must be > 0');
+    sampleRate = Math.min(sampleRate, SWEEP_SAMPLE_RATE_MAX_HZ);
+
+    const osIdxMaxForRate = maxOsForFreq(sampleRate);
+    const osIdx = Math.min(osIdxRequested, osIdxMaxForRate);
+    const framesPerPoint = Math.max(1, Math.round((sampleRate * averageMs) / 1000));
+    const sweepDurationS = pointCount * ((stepSettleMs + averageMs) / 1000.0);
+
+    const prevStream = !!session.stream_enabled;
+    let transport = null;
+    let laser = null;
+    let previousMask = null;
+    let maskApplied = false;
+
+    const normalizeSweepSnapshot = (raw) => {
+      let powerW = raw;
+      if (Array.isArray(raw) && Array.isArray(raw[0])) {
+        powerW = raw[0];
+      }
+      if (!Array.isArray(powerW) || powerW.length < 4) {
+        throw new Error('Invalid power snapshot payload');
+      }
+      return [0, 1, 2, 3].map((i) => Number(powerW[i] || 0));
+    };
+
+    const buildTargetAxis = () => {
+      if (pointCount <= 1) return [Number(startNm)];
+      const span = stopNm - startNm;
+      return Array.from({ length: pointCount }, (_, idx) => startNm + (span * idx) / (pointCount - 1));
+    };
+
+    session.busy = true;
+    session.stream_enabled = false;
+
+    try {
+      try {
+        previousMask = Number(await session.dev.get_channel_mask()) & 0x0f;
+      } catch (_) {
+        previousMask = null;
+      }
+
+      if (previousMask != null && previousMask !== channelMask) {
+        await session.dev.set_channel_mask(channelMask);
+        maskApplied = true;
+      }
+
+      this.captureState = 'running';
+      this.captureMessage = `Configuring visible sweep for ${pointCount} points`;
+
+      await session.dev.set_freq(sampleRate);
+      await session.dev.set_oversampling(osIdx);
+      let actualOsIdx = osIdx;
+      try {
+        actualOsIdx = Number(await session.dev.get_oversampling());
+      } catch (_) {
+        actualOsIdx = osIdx;
+      }
+
+      session.default_os_idx = actualOsIdx;
+      session.os_idx = actualOsIdx;
+
+      try {
+        if (String(session.detector_type || '').toUpperCase() === CoreDAQ.DETECTOR_INGAAS) {
+          session.dev.set_responsivity_reference_nm(1550.0);
+          session.dev.set_wavelength_nm(1550.0);
+          session.wavelength_nm = Number(session.dev.get_wavelength_nm());
+        }
+      } catch (_) {
+        // ignore wavelength correction setup failures
+      }
+
+      if (session.frontend_type === CoreDAQ.FRONTEND_LINEAR) {
+        for (let head = 1; head <= 4; head += 1) {
+          // eslint-disable-next-line no-await-in-loop
+          await session.dev.set_gain(head, gains[head - 1]);
+        }
+      }
+
+      this.captureMessage = 'Connecting to visible laser';
+      const opened = await this._openUsbRawTransport(res, {
+        timeoutMs: 3200,
+        probeIdn: true,
+      });
+      transport = opened.transport;
+
+      const gpibIdn = String(opened.idn || '').trim() || null;
+      const gpibModel = opened.model || detectLaserModel(gpibIdn || 'TLB6700');
+      if (gpibModel !== 'TLB6700') {
+        throw new Error('Unsupported visible laser model. Supported USB raw model: TLB6700 controller family.');
+      }
+
+      this.gpibIdn = gpibIdn;
+      this.gpibModel = gpibModel;
+      this.gpibResource = res;
+
+      ({ laser } = createLaserFromIdn(gpibIdn || gpibModel, transport));
+      if (!laser || typeof laser.configureForStepSweep !== 'function') {
+        throw new Error('Selected visible laser driver does not support step sweep control');
+      }
+
+      this.captureMessage = 'Configuring visible laser';
+      await laser.configureForStepSweep({ powerMw, outputEnabled: true });
+      if (typeof laser.waitForOperationComplete === 'function') {
+        await laser.waitForOperationComplete({ timeoutMs: 4000, pollIntervalMs: 150 });
+      }
+
+      const activeChannels = activeChannelIndices(channelMask);
+      const saveActiveChannels = activeChannelIndices(saveChannelMask);
+      const channelsW = [[], [], [], []];
+      const wavelengthNm = [];
+      const targetAxis = buildTargetAxis();
+      const snapshotTimeoutS = Math.max(1.0, (averageMs / 1000.0) + 1.5);
+
+      for (let idx = 0; idx < targetAxis.length; idx += 1) {
+        const targetNm = Number(targetAxis[idx]);
+        this.captureMessage = `Visible sweep point ${idx + 1}/${targetAxis.length}`;
+
+        // eslint-disable-next-line no-await-in-loop
+        await laser.setWavelengthNm(targetNm);
+        if (typeof laser.waitForOperationComplete === 'function') {
+          // eslint-disable-next-line no-await-in-loop
+          await laser.waitForOperationComplete({ timeoutMs: 5000, pollIntervalMs: 150 });
+        }
+        if (stepSettleMs > 0) {
+          // eslint-disable-next-line no-await-in-loop
+          await sleepMs(stepSettleMs);
+        }
+
+        let actualNm = targetNm;
+        if (typeof laser.getWavelengthNm === 'function') {
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            const readbackNm = Number(await laser.getWavelengthNm());
+            if (Number.isFinite(readbackNm)) actualNm = readbackNm;
+          } catch (_) {
+            // fall back to requested wavelength
+          }
+        }
+
+        // eslint-disable-next-line no-await-in-loop
+        const raw = await session.dev.snapshot_W(
+          framesPerPoint,
+          snapshotTimeoutS,
+          200.0,
+          null,
+          !!session.autogain_enabled,
+          100.0,
+          3000.0,
+          10,
+          0.01,
+          true,
+        );
+        const sampleW = normalizeSweepSnapshot(raw);
+
+        wavelengthNm.push(actualNm);
+        for (let ch = 0; ch < 4; ch += 1) {
+          if (!activeChannels.includes(ch)) continue;
+          channelsW[ch].push(sampleW[ch]);
+        }
+      }
+
+      let roomTempC = null;
+      let roomHumidityPct = null;
+      try {
+        roomTempC = Number(await session.dev.get_head_temperature_C());
+      } catch (_) {
+        roomTempC = null;
+      }
+      try {
+        roomHumidityPct = Number(await session.dev.get_head_humidity());
+      } catch (_) {
+        roomHumidityPct = null;
+      }
+
+      if (Number.isFinite(returnWavelengthNm) && laser && typeof laser.setWavelengthNm === 'function') {
+        try {
+          this.captureMessage = 'Returning visible laser';
+          await laser.setWavelengthNm(returnWavelengthNm);
+          if (typeof laser.waitForOperationComplete === 'function') {
+            await laser.waitForOperationComplete({ timeoutMs: 5000, pollIntervalMs: 150 });
+          }
+        } catch (err) {
+          this.captureMessage = `Visible sweep complete, but laser return failed (${String(err?.message || err)})`;
+        }
+      }
+
+      const sampleIndices = decimateIndices(wavelengthNm.length, previewPoints);
+      const series = this._buildSweepSeriesFromAxis(channelsW, wavelengthNm, sampleIndices);
+      const payload = {
+        captured_at_unix: nowSec(),
+        captured_at_utc: isoUtcNow(),
+        resource: res,
+        laser_backend: 'usb-raw',
+        gpib_idn: this.gpibIdn,
+        gpib_model: this.gpibModel,
+        device_id: session.device_id,
+        frontend_type: session.frontend_type,
+        coredaq_port: session.port,
+        coredaq_idn: session.idn,
+        start_nm: startNm,
+        stop_nm: stopNm,
+        power_mw: powerMw,
+        return_wavelength_nm: returnWavelengthNm,
+        sample_rate_hz: sampleRate,
+        os_idx: Number(session.os_idx),
+        os_idx_requested: osIdxRequested,
+        os_idx_max_for_rate: osIdxMaxForRate,
+        gains,
+        channel_mask: channelMask,
+        active_channels: activeChannels,
+        save_channel_mask: saveChannelMask,
+        save_active_channels: saveActiveChannels,
+        samples_total: pointCount,
+        point_count: pointCount,
+        step_settle_ms: stepSettleMs,
+        average_ms: averageMs,
+        snapshot_frames_per_point: framesPerPoint,
+        sweep_duration_s: sweepDurationS,
+        sweep_mode: 'step-visible',
+        room_temp_c: roomTempC,
+        room_humidity_pct: roomHumidityPct,
+        wavelength_nm: wavelengthNm,
+        channels_w: channelsW,
+      };
+
+      this.lastSweep = payload;
+      this.captureState = 'idle';
+      this.captureMessage = `Visible sweep complete: ${pointCount} points`;
+
+      return {
+        ...payload,
+        preview_points: previewPoints,
+        series,
+      };
+    } finally {
+      if (maskApplied && previousMask != null) {
+        try {
+          await session.dev.set_channel_mask(previousMask);
+        } catch (_) {
+          // ignore restore failures
+        }
+      }
+      if (transport) {
+        await transport.close().catch(() => {});
+      }
+      session.stream_enabled = prevStream;
+      session.busy = false;
+    }
+  }
+
   async _runSweepCapture(session, resource, params) {
     const res = String(resource || '').trim();
     if (!res) throw new Error('No GPIB resource selected');
+    const sweepMode = String(params?.sweep_mode || '').trim().toLowerCase();
+    if (this._isUsbRawResource(res) || sweepMode === 'step-visible') {
+      return this._runVisibleStepSweepCapture(session, res, params || {});
+    }
     if (session.busy) throw new Error('Selected device is busy');
 
     const startNm = Number(params.start_nm ?? 1480.0);
@@ -2456,11 +3251,17 @@ class CoreDAQBackend {
       os_idx_max_for_rate: Number(payload?.os_idx_max_for_rate),
       sweep_duration_s: Number(payload?.sweep_duration_s),
       samples_total: Number(payload?.samples_total),
+      point_count: Number(payload?.point_count),
+      step_settle_ms: Number(payload?.step_settle_ms),
+      average_ms: Number(payload?.average_ms),
+      snapshot_frames_per_point: Number(payload?.snapshot_frames_per_point),
+      sweep_mode: payload?.sweep_mode || null,
       channel_mask: Number(payload?.channel_mask),
       save_channel_mask: Number(payload?.save_channel_mask),
       active_channels: Array.isArray(payload?.active_channels) ? payload.active_channels : [],
       save_active_channels: active,
       gains: Array.isArray(payload?.gains) ? payload.gains : [],
+      wavelength_nm: Array.isArray(payload?.wavelength_nm) ? payload.wavelength_nm : null,
       channels_w: compactChannelsW,
       virtual_series: virtualSeries,
     };
@@ -2806,14 +3607,19 @@ class CoreDAQBackend {
         let idn = null;
         let model = null;
         let detectError = null;
+        let backend = null;
         try {
           const out = await this._gpibQuery(resource, '*IDN?');
           idn = String(out.reply || '').trim() || null;
           model = out.model || null;
+          backend = String(out.backend || '').trim() || null;
           this.gpibIdn = idn;
           this.gpibModel = model;
         } catch (err) {
           detectError = String(err?.message || err);
+          backend = this._isUsbRawResource(resource)
+            ? 'usb-raw'
+            : (this._isFtdiResource(resource) ? 'ftdi-serial' : 'visa-service');
           this.gpibIdn = null;
           this.gpibModel = null;
         }
@@ -2826,7 +3632,7 @@ class CoreDAQBackend {
           idn,
           model,
           detect_error: detectError,
-          backend: 'visa-service',
+          backend,
         }));
         return;
       }

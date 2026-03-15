@@ -58,7 +58,29 @@ const OS_IDX_MIN = 0;
 const OS_IDX_MAX = 6;
 const SWEEP_PREVIEW_POINTS_DEFAULT = 120_000;
 const DEFAULT_SWEEP_MASK = 0x0f;
+const DEFAULT_TSL_START_NM = 1500;
+const DEFAULT_TSL_STOP_NM = 1600;
+const DEFAULT_VISIBLE_START_NM = 770;
+const DEFAULT_VISIBLE_STOP_NM = 780;
+const DEFAULT_VISIBLE_MIN_NM = 765;
+const DEFAULT_VISIBLE_MAX_NM = 781;
+const DEFAULT_VISIBLE_POINT_COUNT = 201;
+const DEFAULT_VISIBLE_SETTLE_MS = 500;
+const DEFAULT_VISIBLE_AVERAGE_MS = 100;
 const CAPTURE_SELECTED_RESOURCE_KEY = 'coreconsole.capture.selected_resource';
+const DETECTOR_NOMINAL_LIMITS: Record<string, [number, number]> = {
+  INGAAS: [910, 1700],
+  SILICON: [400, 1100],
+};
+
+type LaserSweepProfile = {
+  family: 'tsl' | 'visible' | 'unknown';
+  model: string | null;
+  minNm: number | null;
+  maxNm: number | null;
+  defaultStartNm: number;
+  defaultStopNm: number;
+};
 
 function loadPersistedSelectedResource(): string {
   try {
@@ -111,6 +133,12 @@ function userFacingSweepError(raw: string): string {
   if (t.includes('no gpib resource selected') || t.includes('no gpib resource provided')) {
     return 'No laser resource selected. Click Scan Resources, select a resource, then run sweep.';
   }
+  if (t.includes('visible step sweep requires a usb raw laser resource')) {
+    return 'Visible step sweep needs a USB raw laser resource. Re-scan and select the TLB6700 USB controller entry.';
+  }
+  if (t.includes('usb raw backend not supported') || t.includes('winusb/libusb') || t.includes('usbdk')) {
+    return 'Visible laser USB control is not available with the current Windows driver. Bind the controller to WinUSB/libusb or enable UsbDK, then re-scan.';
+  }
   if (t.includes('not found or not responding on visa resource') || t.includes('not found or not responding on ftdi resource')) {
     return raw;
   }
@@ -130,6 +158,98 @@ function detectLaserModelFromIdn(idnRaw: string): string | null {
   if (t.includes('TSL710') || (t.includes('SANTEC') && t.includes('710'))) return 'TSL710';
   if (t.includes('TSL770') || (t.includes('SANTEC') && t.includes('770'))) return 'TSL770';
   return null;
+}
+
+function detectVisibleLaserModel(raw: string): string | null {
+  const t = String(raw || '').toUpperCase();
+  if (!t) return null;
+  if (t.includes('TLB6700')) return 'TLB6700';
+  if (t.includes('TLB-6700')) return 'TLB6700';
+  if (t.includes('TLB 6700')) return 'TLB6700';
+  if (t.includes('NEW_FOCUS') && t.includes('6700')) return 'TLB6700';
+  if (t.includes('NEW FOCUS') && t.includes('6700')) return 'TLB6700';
+  if (t.includes('TLB')) return 'TLB6700';
+  return null;
+}
+
+function approxEq(a: number, b: number, eps = 1e-6): boolean {
+  return Math.abs(Number(a) - Number(b)) <= eps;
+}
+
+function sweepLooksLikeKnownDefault(startNm: number, stopNm: number): boolean {
+  return (
+    (approxEq(startNm, DEFAULT_TSL_START_NM) && approxEq(stopNm, DEFAULT_TSL_STOP_NM))
+    || (approxEq(startNm, DEFAULT_VISIBLE_START_NM) && approxEq(stopNm, DEFAULT_VISIBLE_STOP_NM))
+  );
+}
+
+function resolveLaserSweepProfile(row: GpibResource | null, fallbackModel: string | null): LaserSweepProfile {
+  const combined = [
+    row?.model || '',
+    row?.idn || '',
+    fallbackModel || '',
+    row?.resource || '',
+  ].join(' ');
+
+  const tslModel = detectLaserModelFromIdn(combined);
+  if (tslModel) {
+    return {
+      family: 'tsl',
+      model: tslModel,
+      minNm: null,
+      maxNm: null,
+      defaultStartNm: DEFAULT_TSL_START_NM,
+      defaultStopNm: DEFAULT_TSL_STOP_NM,
+    };
+  }
+
+  const visibleModel = detectVisibleLaserModel(combined);
+  if (visibleModel) {
+    return {
+      family: 'visible',
+      model: visibleModel,
+      minNm: DEFAULT_VISIBLE_MIN_NM,
+      maxNm: DEFAULT_VISIBLE_MAX_NM,
+      defaultStartNm: DEFAULT_VISIBLE_START_NM,
+      defaultStopNm: DEFAULT_VISIBLE_STOP_NM,
+    };
+  }
+
+  return {
+    family: 'unknown',
+    model: null,
+    minNm: null,
+    maxNm: null,
+    defaultStartNm: DEFAULT_TSL_START_NM,
+    defaultStopNm: DEFAULT_TSL_STOP_NM,
+  };
+}
+
+function buildLaserRangeWarning(profile: LaserSweepProfile, startNm: number, stopNm: number): string | null {
+  if (!(Number.isFinite(profile.minNm) && Number.isFinite(profile.maxNm))) return null;
+  const lo = Math.min(startNm, stopNm);
+  const hi = Math.max(startNm, stopNm);
+  const minNm = Number(profile.minNm);
+  const maxNm = Number(profile.maxNm);
+  if (lo >= minNm && hi <= maxNm) return null;
+  const modelLabel = profile.model || 'selected laser';
+  return `Requested sweep range ${lo.toFixed(3)}-${hi.toFixed(3)} nm is outside the known ${modelLabel} range ${minNm.toFixed(3)}-${maxNm.toFixed(3)} nm.`;
+}
+
+function buildDetectorCompatibilityWarning(detectorType: string, startNm: number, stopNm: number): string | null {
+  const limits = DETECTOR_NOMINAL_LIMITS[String(detectorType || '').toUpperCase()];
+  if (!limits) return null;
+  const lo = Math.min(startNm, stopNm);
+  const hi = Math.max(startNm, stopNm);
+  if (lo >= limits[0] && hi <= limits[1]) return null;
+  return `Selected sweep range ${lo.toFixed(3)}-${hi.toFixed(3)} nm is outside the nominal ${String(detectorType).toUpperCase()} detector range ${limits[0]}-${limits[1]} nm. The sweep can still run, but optical signal may be invalid or absent.`;
+}
+
+function inferResourceBackend(resource: string): string {
+  const txt = String(resource || '').trim().toUpperCase();
+  if (txt.startsWith('USBRAW::')) return 'usb-raw';
+  if (txt.startsWith('FTDI::')) return 'ftdi-serial';
+  return 'visa-service';
 }
 
 function formatFrontendLabel(frontend: string | null | undefined): string {
@@ -279,10 +399,13 @@ export default function CaptureTab({
   const [logs, setLogs] = useState<LogLine[]>([]);
   const [scanWarnings, setScanWarnings] = useState<string[]>([]);
 
-  const [startNm, setStartNm] = useState(1500);
-  const [stopNm, setStopNm] = useState(1600);
+  const [startNm, setStartNm] = useState(DEFAULT_TSL_START_NM);
+  const [stopNm, setStopNm] = useState(DEFAULT_TSL_STOP_NM);
   const [speedNmS, setSpeedNmS] = useState(50);
   const [powerMw, setPowerMw] = useState(1);
+  const [visiblePointCount, setVisiblePointCount] = useState(DEFAULT_VISIBLE_POINT_COUNT);
+  const [visibleSettleMs, setVisibleSettleMs] = useState(DEFAULT_VISIBLE_SETTLE_MS);
+  const [visibleAverageMs, setVisibleAverageMs] = useState(DEFAULT_VISIBLE_AVERAGE_MS);
   const [sampleRateHz, setSampleRateHz] = useState(() => captureSessionCache.sample_rate_hz ?? SAMPLE_RATE_DEFAULT);
   const [osIdx, setOsIdx] = useState(() => captureSessionCache.os_idx ?? 0);
 
@@ -345,6 +468,15 @@ export default function CaptureTab({
       return merged;
     });
   }, []);
+
+  const selectedResourceRow = useMemo(
+    () => resources.find((r) => r.resource === selectedResource) || null,
+    [resources, selectedResource]
+  );
+  const selectedLaserProfile = useMemo(
+    () => resolveLaserSweepProfile(selectedResourceRow, gpibModel),
+    [selectedResourceRow, gpibModel]
+  );
 
   useEffect(() => {
     if (!selectedDeviceId) return;
@@ -409,7 +541,7 @@ export default function CaptureTab({
     upsertResource({
       resource: selectedResource,
       model: gpibModel,
-      backend: 'visa-service',
+      backend: inferResourceBackend(selectedResource),
     });
   }, [gpibModel, resources, selectedResource, upsertResource]);
 
@@ -424,6 +556,27 @@ export default function CaptureTab({
     setLogs((prev) => [...prev.slice(-199), { ts: tsNow(), text }]);
   }, []);
 
+  useEffect(() => {
+    if (!selectedResource) return;
+    if (!sweepLooksLikeKnownDefault(startNm, stopNm)) return;
+    const nextStart = selectedLaserProfile.defaultStartNm;
+    const nextStop = selectedLaserProfile.defaultStopNm;
+    if (approxEq(startNm, nextStart) && approxEq(stopNm, nextStop)) return;
+    setStartNm(nextStart);
+    setStopNm(nextStop);
+    if (selectedLaserProfile.family === 'visible') {
+      addLog(`Visible laser defaults applied: ${nextStart.toFixed(3)}-${nextStop.toFixed(3)} nm.`);
+    }
+  }, [
+    selectedResource,
+    selectedLaserProfile.defaultStartNm,
+    selectedLaserProfile.defaultStopNm,
+    selectedLaserProfile.family,
+    startNm,
+    stopNm,
+    addLog,
+  ]);
+
   const warnUser = (message: string) => {
     addLog(message);
     window.alert(message);
@@ -431,13 +584,30 @@ export default function CaptureTab({
 
   const estimate = useMemo(() => {
     const span = Math.abs(stopNm - startNm);
+    if (selectedLaserProfile.family === 'visible') {
+      const points = Math.max(1, Math.round(Number(visiblePointCount) || DEFAULT_VISIBLE_POINT_COUNT));
+      const settleMs = Math.max(0, Math.round(Number(visibleSettleMs) || 0));
+      const averageMs = Math.max(1, Math.round(Number(visibleAverageMs) || DEFAULT_VISIBLE_AVERAGE_MS));
+      const duration = points * ((settleMs + averageMs) / 1000.0);
+      const resolutionPm = points > 1 ? (span / (points - 1)) * 1000.0 : null;
+      return { duration, samples: points, span, resolutionPm, sampleLabel: 'points' };
+    }
     const duration = speedNmS > 0 ? span / speedNmS : 0;
     const samples = Math.max(1, Math.round(duration * sampleRateHz));
     const resolutionPm = speedNmS > 0 && sampleRateHz > 0
       ? (speedNmS / sampleRateHz) * 1000.0
       : null;
-    return { duration, samples, span, resolutionPm };
-  }, [startNm, stopNm, speedNmS, sampleRateHz]);
+    return { duration, samples, span, resolutionPm, sampleLabel: 'samples' };
+  }, [
+    startNm,
+    stopNm,
+    speedNmS,
+    sampleRateHz,
+    selectedLaserProfile.family,
+    visiblePointCount,
+    visibleSettleMs,
+    visibleAverageMs,
+  ]);
 
   useEffect(() => {
     if (!scanningVisa) return () => undefined;
@@ -461,7 +631,7 @@ export default function CaptureTab({
           resource: s.gpib_resource,
           idn,
           model,
-          backend: 'visa-service',
+          backend: inferResourceBackend(s.gpib_resource),
         });
       }
       if (typeof s.gpib_model === 'string' && s.gpib_model.length > 0) {
@@ -520,7 +690,7 @@ export default function CaptureTab({
               resource,
               idn: cmd.toUpperCase() === '*IDN?' || cmd.toUpperCase() === 'IDN?' ? reply : undefined,
               model: cmd.toUpperCase() === '*IDN?' || cmd.toUpperCase() === 'IDN?' ? model : undefined,
-              backend: String(msg.backend ?? 'visa-service'),
+              backend: String(msg.backend ?? inferResourceBackend(resource)),
             });
           }
         } else {
@@ -537,7 +707,7 @@ export default function CaptureTab({
             const model = typeof msg.model === 'string' && msg.model.length > 0 ? msg.model : null;
             setSelectedResourceCached(resource);
             if (model) setGpibModelCached(model);
-            upsertResource({ resource, idn, model, backend: String(msg.backend ?? 'visa-service') });
+            upsertResource({ resource, idn, model, backend: String(msg.backend ?? inferResourceBackend(resource)) });
           }
         }
         return;
@@ -558,7 +728,8 @@ export default function CaptureTab({
 
         const n = Number(msg.samples_total ?? 0);
         setSamplesTotal(Number.isFinite(n) ? n : null);
-        addLog(`Sweep complete: ${n} samples`);
+        const resultLabel = String(msg.sweep_mode ?? '') === 'step-visible' ? 'points' : 'samples';
+        addLog(`Sweep complete: ${n} ${resultLabel}`);
         const effectiveRate = Number(msg.sample_rate_hz);
         if (Number.isFinite(effectiveRate) && effectiveRate > 0) {
         }
@@ -661,13 +832,22 @@ export default function CaptureTab({
       warnUser('No laser resource selected. Click Scan Resources, select a resource, then run sweep.');
       return;
     }
-    const selectedRow = resources.find((r) => r.resource === selectedResource) || null;
-    if (selectedRow && (!selectedRow.idn || String(selectedRow.idn).trim().length === 0)) {
+    if (selectedResourceRow && (!selectedResourceRow.idn || String(selectedResourceRow.idn).trim().length === 0)) {
       addLog('Selected resource has no cached IDN response. Backend will verify at sweep start.');
     }
-    const selectedModel = (selectedRow?.model || gpibModel || '').toString().toUpperCase();
+    const selectedModel = (selectedResourceRow?.model || gpibModel || '').toString().toUpperCase();
     if (!selectedModel) {
       addLog('Laser model not cached. Backend will detect model at sweep start.');
+    }
+
+    const preflightWarnings = [
+      buildLaserRangeWarning(selectedLaserProfile, startNm, stopNm),
+      buildDetectorCompatibilityWarning(selectedDetectorType, startNm, stopNm),
+    ].filter((msg): msg is string => Boolean(msg));
+    if (preflightWarnings.length > 0) {
+      for (const warning of preflightWarnings) addLog(`Warning: ${warning}`);
+      const proceed = window.confirm(`${preflightWarnings.join('\n\n')}\n\nContinue anyway?`);
+      if (!proceed) return;
     }
 
     const clampedRate = clampSampleRate(sampleRateHz);
@@ -686,16 +866,18 @@ export default function CaptureTab({
     setSweepX([]);
     setPhysY([[], [], [], []]);
     setHasSweepData(false);
-    addLog(`Starting sweep on ${selectedDeviceId}...`);
+    addLog(`${selectedLaserProfile.family === 'visible' ? 'Starting visible step sweep' : 'Starting sweep'} on ${selectedDeviceId}...`);
 
     const channelMask = buildSweepMask(active);
     const saveChannelMask = buildSaveMask(active);
+    const isVisibleSweep = selectedLaserProfile.family === 'visible';
     const params: Record<string, unknown> = {
       start_nm: startNm,
       stop_nm: stopNm,
-      speed_nm_s: speedNmS,
       power_mw: powerMw,
-      return_wavelength_nm: (typeof selectedDevice?.wavelength_nm === 'number' && Number.isFinite(selectedDevice.wavelength_nm)) ? selectedDevice.wavelength_nm : 1550.0,
+      return_wavelength_nm: isVisibleSweep
+        ? startNm
+        : ((typeof selectedDevice?.wavelength_nm === 'number' && Number.isFinite(selectedDevice.wavelength_nm)) ? selectedDevice.wavelength_nm : 1550.0),
       sample_rate_hz: clampedRate,
       os_idx: clampedOsIdx,
       channel_mask: channelMask,
@@ -708,6 +890,14 @@ export default function CaptureTab({
       })),
       preview_points: SWEEP_PREVIEW_POINTS_DEFAULT,
     };
+    if (isVisibleSweep) {
+      params.sweep_mode = 'step-visible';
+      params.point_count = Math.max(1, Math.round(Number(visiblePointCount) || DEFAULT_VISIBLE_POINT_COUNT));
+      params.step_settle_ms = Math.max(0, Math.round(Number(visibleSettleMs) || 0));
+      params.average_ms = Math.max(1, Math.round(Number(visibleAverageMs) || DEFAULT_VISIBLE_AVERAGE_MS));
+    } else {
+      params.speed_nm_s = speedNmS;
+    }
     if (selectedIsLinear) {
       params.gains = gains;
     }
@@ -914,6 +1104,13 @@ export default function CaptureTab({
                 </button>
               </div>
             </div>
+            {selectedLaserProfile.family === 'visible' && (
+              <div className="capture-hint">
+                Visible laser profile active. Using fallback defaults {selectedLaserProfile.defaultStartNm.toFixed(0)}-
+                {selectedLaserProfile.defaultStopNm.toFixed(0)} nm and nominal range {Number(selectedLaserProfile.minNm).toFixed(0)}-
+                {Number(selectedLaserProfile.maxNm).toFixed(0)} nm unless the laser reports tighter limits later.
+              </div>
+            )}
 
             <div className="capture-grid-2">
               <div className="capture-field">
@@ -921,6 +1118,8 @@ export default function CaptureTab({
                 <input
                   className="capture-input"
                   type="number"
+                  min={selectedLaserProfile.minNm ?? undefined}
+                  max={selectedLaserProfile.maxNm ?? undefined}
                   step="0.001"
                   value={startNm}
                   onChange={(e) => setStartNm(Number(e.target.value))}
@@ -931,6 +1130,8 @@ export default function CaptureTab({
                 <input
                   className="capture-input"
                   type="number"
+                  min={selectedLaserProfile.minNm ?? undefined}
+                  max={selectedLaserProfile.maxNm ?? undefined}
                   step="0.001"
                   value={stopNm}
                   onChange={(e) => setStopNm(Number(e.target.value))}
@@ -938,30 +1139,84 @@ export default function CaptureTab({
               </div>
             </div>
 
-            <div className="capture-grid-2">
-              <div className="capture-field">
-                <label className="capture-label">Speed (nm/s)</label>
-                <input
-                  className="capture-input"
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={speedNmS}
-                  onChange={(e) => setSpeedNmS(Number(e.target.value))}
-                />
+            {selectedLaserProfile.family === 'visible' ? (
+              <>
+                <div className="capture-grid-2">
+                  <div className="capture-field">
+                    <label className="capture-label">Points</label>
+                    <input
+                      className="capture-input"
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={visiblePointCount}
+                      onChange={(e) => setVisiblePointCount(Math.max(1, Math.round(Number(e.target.value) || 1)))}
+                    />
+                  </div>
+                  <div className="capture-field">
+                    <label className="capture-label">Laser Power (mW)</label>
+                    <input
+                      className="capture-input"
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={powerMw}
+                      onChange={(e) => setPowerMw(Number(e.target.value))}
+                    />
+                  </div>
+                </div>
+
+                <div className="capture-grid-2">
+                  <div className="capture-field">
+                    <label className="capture-label">Settle (ms)</label>
+                    <input
+                      className="capture-input"
+                      type="number"
+                      min="0"
+                      step="10"
+                      value={visibleSettleMs}
+                      onChange={(e) => setVisibleSettleMs(Math.max(0, Math.round(Number(e.target.value) || 0)))}
+                    />
+                  </div>
+                  <div className="capture-field">
+                    <label className="capture-label">Average (ms)</label>
+                    <input
+                      className="capture-input"
+                      type="number"
+                      min="1"
+                      step="10"
+                      value={visibleAverageMs}
+                      onChange={(e) => setVisibleAverageMs(Math.max(1, Math.round(Number(e.target.value) || 1)))}
+                    />
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="capture-grid-2">
+                <div className="capture-field">
+                  <label className="capture-label">Speed (nm/s)</label>
+                  <input
+                    className="capture-input"
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={speedNmS}
+                    onChange={(e) => setSpeedNmS(Number(e.target.value))}
+                  />
+                </div>
+                <div className="capture-field">
+                  <label className="capture-label">Laser Power (mW)</label>
+                  <input
+                    className="capture-input"
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={powerMw}
+                    onChange={(e) => setPowerMw(Number(e.target.value))}
+                  />
+                </div>
               </div>
-              <div className="capture-field">
-                <label className="capture-label">Laser Power (mW)</label>
-                <input
-                  className="capture-input"
-                  type="number"
-                  min="0"
-                  step="0.1"
-                  value={powerMw}
-                  onChange={(e) => setPowerMw(Number(e.target.value))}
-                />
-              </div>
-            </div>
+            )}
 
             <div className="capture-field">
               <label className="capture-label">Detector</label>
@@ -1036,14 +1291,14 @@ export default function CaptureTab({
 
             <div className="capture-meta">
               {captureMessage || 'Ready'} - Span {estimate.span.toFixed(3)} nm - Duration{' '}
-              {estimate.duration.toFixed(2)} s - Est {estimate.samples.toLocaleString()} samples
+              {estimate.duration.toFixed(2)} s - Est {estimate.samples.toLocaleString()} {estimate.sampleLabel}
               {estimate.resolutionPm != null ? ` - Resolution ${estimate.resolutionPm.toFixed(3)} pm` : ''}
-              {samplesTotal ? ` - Last ${samplesTotal.toLocaleString()} samples` : ''}
+              {samplesTotal ? ` - Last ${samplesTotal.toLocaleString()} ${estimate.sampleLabel}` : ''}
             </div>
 
             <div className="capture-log">
               {logs.length === 0 ? (
-                <div className="console-empty">Use Scan Resources and *IDN? to detect TSL550/570/710/770.</div>
+                <div className="console-empty">Use Scan Resources and *IDN? to detect TSL550/570/710/770 or a TLB6700 visible controller.</div>
               ) : (
                 logs.map((l, i) => (
                   <div key={i} className="console-line rx">

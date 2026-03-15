@@ -6,6 +6,8 @@ function detectLaserModel(idn) {
   if (txt.includes('TSL570') || (txt.includes('SANTEC') && txt.includes('570'))) return 'TSL570';
   if (txt.includes('TSL710') || (txt.includes('SANTEC') && txt.includes('710'))) return 'TSL710';
   if (txt.includes('TSL770') || (txt.includes('SANTEC') && txt.includes('770'))) return 'TSL770';
+  if (txt.includes('TLB6700') || txt.includes('TLB-6700') || txt.includes('TLB 6700')) return 'TLB6700';
+  if ((txt.includes('NEW_FOCUS') || txt.includes('NEW FOCUS')) && txt.includes('6700')) return 'TLB6700';
   return null;
 }
 
@@ -253,6 +255,213 @@ class BaseTSL {
     throw new Error('Not implemented');
   }
 }
+
+class TLB6700 {
+  constructor(transport, options = {}) {
+    if (!transport || typeof transport.write !== 'function' || typeof transport.query !== 'function') {
+      throw new Error('transport must provide write(cmd) and query(cmd)');
+    }
+    this.transport = transport;
+    this.model = 'TLB6700';
+    this.options = options || {};
+  }
+
+  async write(cmd) {
+    await this.transport.write(cmd);
+  }
+
+  async query(cmd) {
+    return String(await this.transport.query(cmd)).trim();
+  }
+
+  async _writeAny(commands) {
+    let lastErr = null;
+    for (const cmd of commands) {
+      if (!cmd) continue;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await this.write(cmd);
+        return;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (lastErr) throw lastErr;
+    throw new Error('No command candidates provided');
+  }
+
+  async _queryAny(commands) {
+    let lastErr = null;
+    for (const cmd of commands) {
+      if (!cmd) continue;
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        const out = await this.query(cmd);
+        if (String(out || '').trim()) return String(out).trim();
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    if (lastErr) throw lastErr;
+    return '';
+  }
+
+  async idn() {
+    return String(await this._queryAny(['*IDN?'])).trim();
+  }
+
+  async ensureRemote() {
+    await this._writeAny(['SYST:MCON REM', 'SYSTEM:MCONTROL REM']);
+  }
+
+  async setOutputEnabled(enabled) {
+    await this._writeAny([
+      `OUTP:STAT ${enabled ? 1 : 0}`,
+      `OUTPUT:STATE ${enabled ? 'ON' : 'OFF'}`,
+    ]);
+  }
+
+  async setTrackEnabled(enabled) {
+    await this._writeAny([
+      `OUTP:TRAC ${enabled ? 1 : 0}`,
+      `OUTPUT:TRACK ${enabled ? 1 : 0}`,
+    ]);
+  }
+
+  async setPowerMw(powerMw) {
+    const power = Number(powerMw);
+    if (!(power >= 0)) throw new Error('power_mw must be >= 0');
+    await this._writeAny([
+      `SOUR:POW:DIOD ${formatNumber(power)}`,
+      `SOURCE:POWER:DIODE ${formatNumber(power)}`,
+    ]);
+  }
+
+  async setConstantPowerMode(enabled = true) {
+    await this._writeAny([
+      `SOUR:CPOW ${enabled ? 1 : 0}`,
+      `SOURCE:CPOWER ${enabled ? 1 : 0}`,
+    ]);
+  }
+
+  async setWavelengthNm(wavelengthNm) {
+    const wl = Number(wavelengthNm);
+    if (!Number.isFinite(wl) || wl <= 0) throw new Error(`Invalid wavelength: ${wavelengthNm}`);
+    await this.ensureRemote();
+    await this.setTrackEnabled(true);
+    await this._writeAny([
+      `SOUR:WAVE ${formatNumber(wl)}`,
+      `SOURCE:WAVELENGTH ${formatNumber(wl)}`,
+    ]);
+  }
+
+  async getWavelengthNm() {
+    const raw = await this._queryAny(['SENS:WAVE?', 'SENSE:WAVELENGTH?']);
+    const value = Number(String(raw || '').trim());
+    if (!Number.isFinite(value)) throw new Error(`Invalid wavelength readback: ${raw}`);
+    return value;
+  }
+
+  async configureForStepSweep({ powerMw = 1.0, outputEnabled = true } = {}) {
+    await this.ensureRemote();
+    await this.setConstantPowerMode(true);
+    await this.setPowerMw(powerMw);
+    if (outputEnabled) {
+      await this.setOutputEnabled(true);
+    }
+  }
+
+  async configureForSweep({ startNm, stopNm, powerMw, speedNmS }) {
+    const start = Number(startNm);
+    const stop = Number(stopNm);
+    const power = Number(powerMw);
+    const speed = Number(speedNmS);
+    if (!Number.isFinite(start) || !Number.isFinite(stop)) throw new Error('start/stop wavelength is invalid');
+    if (!(speed > 0)) throw new Error('speed_nm_s must be > 0');
+    if (!(power >= 0)) throw new Error('power_mw must be >= 0');
+
+    await this.ensureRemote();
+    await this.setConstantPowerMode(true);
+    await this.setPowerMw(power);
+    await this.setOutputEnabled(true);
+    await this.setTrackEnabled(true);
+    await this._writeAny([
+      `SOUR:WAVE:START ${formatNumber(start)}`,
+      `SOURCE:WAVELENGTH:START ${formatNumber(start)}`,
+    ]);
+    await this._writeAny([
+      `SOUR:WAVE:STOP ${formatNumber(stop)}`,
+      `SOURCE:WAVELENGTH:STOP ${formatNumber(stop)}`,
+    ]);
+    await this._writeAny([
+      `SOUR:WAVE:SLEW:FORW ${formatNumber(speed)}`,
+      `SOURCE:WAVELENGTH:SLEW:FORWARD ${formatNumber(speed)}`,
+    ]);
+    await this._writeAny([
+      `SOUR:WAVE:SLEW:RET ${formatNumber(speed)}`,
+      `SOURCE:WAVELENGTH:SLEW:RETURN ${formatNumber(speed)}`,
+    ]);
+  }
+
+  async startSweep() {
+    await this._writeAny(['OUTP:SCAN:START', 'OUTPUT:SCAN:START']);
+  }
+
+  async stopSweep() {
+    await this._writeAny(['OUTP:SCAN:STOP', 'OUTPUT:SCAN:STOP']);
+  }
+
+  async resetSweep() {
+    await this._writeAny(['OUTP:SCAN:RESET', 'OUTPUT:SCAN:RESET']);
+  }
+
+  async getSweepState() {
+    try {
+      const raw = await this._queryAny(['*OPC?']);
+      const num = Number(String(raw || '').trim());
+      if (Number.isFinite(num)) {
+        return {
+          known: true,
+          running: num === 0,
+          raw: String(raw),
+          command: '*OPC?',
+        };
+      }
+    } catch (_) {
+      // ignore and fall through
+    }
+    return { known: false, running: null, raw: null, command: null };
+  }
+
+  async waitForSweepComplete({ timeoutMs = 10000, pollIntervalMs = 300 } = {}) {
+    const deadline = Date.now() + Math.max(200, Math.round(Number(timeoutMs) || 10000));
+    const pollMs = Math.max(50, Math.round(Number(pollIntervalMs) || 300));
+    let last = { known: false, running: null, raw: null, command: null };
+
+    while (Date.now() < deadline) {
+      // eslint-disable-next-line no-await-in-loop
+      last = await this.getSweepState();
+      if (last.known && last.running === false) {
+        return { complete: true, ...last };
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+
+    return { complete: false, ...last };
+  }
+
+  async waitForOperationComplete({ timeoutMs = 10000, pollIntervalMs = 200 } = {}) {
+    return this.waitForSweepComplete({ timeoutMs, pollIntervalMs });
+  }
+
+  async close() {
+    if (typeof this.transport.close === 'function') {
+      await this.transport.close();
+    }
+  }
+}
+
 class TSL550 extends BaseTSL {
   constructor(transport, options = {}) {
     super(transport, 'TSL550', options);
@@ -296,7 +505,6 @@ class TSL770 extends BaseTSL {
   }
 }
 
-
 class TSL710 extends BaseTSL {
   constructor(transport, options = {}) {
     super(transport, 'TSL710', options);
@@ -317,6 +525,7 @@ function createLaserDriver(model, transport, options = {}) {
   if (m === 'TSL570') return new TSL570(transport, options);
   if (m === 'TSL710') return new TSL710(transport, options);
   if (m === 'TSL770') return new TSL770(transport, options);
+  if (m === 'TLB6700') return new TLB6700(transport, options);
   throw new Error(`Unsupported laser model: ${model}`);
 }
 
@@ -330,7 +539,7 @@ function createLaserFromIdn(idn, transport, options = {}) {
         laser: new TSL550(transport, options),
       };
     }
-    throw new Error('Unsupported laser model. Supported models: TSL550, TSL570, TSL710, TSL770.');
+    throw new Error('Unsupported laser model. Supported models: TSL550, TSL570, TSL710, TSL770, TLB6700.');
   }
   return {
     model,
@@ -341,6 +550,7 @@ function createLaserFromIdn(idn, transport, options = {}) {
 module.exports = {
   detectLaserModel,
   BaseTSL,
+  TLB6700,
   TSL550,
   TSL570,
   TSL710,
@@ -348,5 +558,3 @@ module.exports = {
   createLaserDriver,
   createLaserFromIdn,
 };
-
-

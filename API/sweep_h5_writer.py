@@ -125,6 +125,22 @@ def _make_wavelength_axis(start_nm: Optional[float], stop_nm: Optional[float], n
     return np.arange(n, dtype=np.float64)
 
 
+def _explicit_wavelength_axis(payload: Dict[str, Any], sample_count: int) -> Optional[np.ndarray]:
+    raw = payload.get('wavelength_nm')
+    if not isinstance(raw, list) or not raw:
+        return None
+    values: List[float] = []
+    for item in raw:
+        val = _as_float_or_none(item)
+        if val is None:
+            return None
+        values.append(val)
+    arr = np.asarray(values, dtype=np.float64)
+    if sample_count > 0 and arr.size != sample_count:
+        return None
+    return arr
+
+
 def write_h5(payload: Dict[str, Any], out_path: Path) -> None:
     channels = _extract_channels(payload)
     virtual_series = _extract_virtual(payload)
@@ -135,7 +151,9 @@ def write_h5(payload: Dict[str, Any], out_path: Path) -> None:
 
     start_nm = _as_float_or_none(payload.get("start_nm"))
     stop_nm = _as_float_or_none(payload.get("stop_nm"))
-    wavelength_nm = _make_wavelength_axis(start_nm, stop_nm, sample_count)
+    wavelength_nm = _explicit_wavelength_axis(payload, sample_count)
+    if wavelength_nm is None:
+        wavelength_nm = _make_wavelength_axis(start_nm, stop_nm, sample_count)
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -172,12 +190,20 @@ def write_h5(payload: Dict[str, Any], out_path: Path) -> None:
             "os_idx_max_for_rate",
             "sweep_duration_s",
             "samples_total",
+            "point_count",
+            "step_settle_ms",
+            "average_ms",
+            "snapshot_frames_per_point",
             "channel_mask",
             "save_channel_mask",
         ):
             val = _as_float_or_none(payload.get(key))
             if val is not None:
                 meta.attrs[key] = val
+
+        sweep_mode = str(payload.get("sweep_mode") or "")
+        if sweep_mode:
+            meta.attrs["sweep_mode"] = sweep_mode
 
         gains = np.asarray(_as_int_list(payload.get("gains")), dtype=np.int32)
         if gains.size > 0:
