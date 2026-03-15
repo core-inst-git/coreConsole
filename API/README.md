@@ -457,3 +457,33 @@ plt.show()
 ```
 
 See also: `API/examples/example_plot_saved_sweep_minimal.py`.
+
+---
+
+## 20. Native C and C++ APIs
+
+New native host APIs are available in:
+
+- `API/c_api`
+- `API/cpp_api`
+
+Highlights:
+
+- bounded timeout serial transport
+- explicit acquisition state control and transfer APIs
+- snapshot APIs in ADC/mV/V/W
+- examples for quick start and triggered capture
+
+Build C API:
+
+```bash
+cmake -S API/c_api -B API/c_api/build
+cmake --build API/c_api/build --config Release
+```
+
+Build C++ API:
+
+```bash
+cmake -S API/cpp_api -B API/cpp_api/build
+cmake --build API/cpp_api/build --config Release
+```
