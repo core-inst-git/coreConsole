@@ -103,11 +103,11 @@ class CoreDAQ {
   static GAIN_LABELS = [
     '5 mW',
     '1 mW',
-    '500 µW',
-    '100 µW',
-    '50 µW',
-    '10 µW',
-    '5 µW',
+    '500 uW',
+    '100 uW',
+    '50 uW',
+    '10 uW',
+    '5 uW',
     '500 nW',
   ];
 
@@ -165,17 +165,15 @@ class CoreDAQ {
 
     this._factory_zero_adc = [0, 0, 0, 0];
     this._linear_zero_adc = [0, 0, 0, 0];
-    this._loglutByHead = Array.from({ length: CoreDAQ.NUM_HEADS }, () => ({
-      V_V: null,
-      log10P: null,
-      V_mV: null,
-      log10P_Q16: null,
-    }));
-    // Backward-compat aliases to CH1 LUT.
+
     this._loglut_V_V = null;
     this._loglut_log10P = null;
     this._loglut_V_mV = null;
     this._loglut_log10P_Q16 = null;
+    this._loglut_V_V_by_head = [null, null, null, null];
+    this._loglut_log10P_by_head = [null, null, null, null];
+    this._loglut_V_mV_by_head = [null, null, null, null];
+    this._loglut_log10P_Q16_by_head = [null, null, null, null];
 
     this._log_deadband_mV = 300.0;
 
@@ -195,10 +193,10 @@ class CoreDAQ {
     this._fastLinearDecimals = fill2D(CoreDAQ.NUM_HEADS, CoreDAQ.NUM_GAINS, 0);
     this._fastLinearCorr = 1.0;
     this._fastLogCorr = 1.0;
-    this._fastLoglutVByHead = new Array(CoreDAQ.NUM_HEADS).fill(null);
-    this._fastLoglutLog10PByHead = new Array(CoreDAQ.NUM_HEADS).fill(null);
     this._fastLoglutV = null;
     this._fastLoglutLog10P = null;
+    this._fastLoglutVByHead = [null, null, null, null];
+    this._fastLoglutLog10PByHead = [null, null, null, null];
     this._fastSiliconResp = 1.0;
 
     this._onData = (chunk) => {
@@ -730,16 +728,22 @@ class CoreDAQ {
     } catch (_) {
       this._fastSiliconResp = 1.0;
     }
+
     for (let h = 0; h < CoreDAQ.NUM_HEADS; h += 1) {
-      const lut = this._loglutByHead[h];
-      this._fastLoglutVByHead[h] = lut?.V_V || null;
-      this._fastLoglutLog10PByHead[h] = lut?.log10P || null;
+      const xs = this._loglut_V_V_by_head[h];
+      const ys = this._loglut_log10P_by_head[h];
+      if (xs && ys) {
+        this._fastLoglutVByHead[h] = xs;
+        this._fastLoglutLog10PByHead[h] = ys;
+      } else {
+        this._fastLoglutVByHead[h] = null;
+        this._fastLoglutLog10PByHead[h] = null;
+      }
     }
-    this._fastLoglutV = this._fastLoglutVByHead[0] || this._loglut_V_V || null;
-    this._fastLoglutLog10P = this._fastLoglutLog10PByHead[0] || this._loglut_log10P || null;
+    this._fastLoglutV = this._fastLoglutVByHead[0];
+    this._fastLoglutLog10P = this._fastLoglutLog10PByHead[0];
 
     if (this._detector_type === CoreDAQ.DETECTOR_INGAAS) {
-
       let corr = 1.0;
       try { corr = Number(this._ingaas_responsivity_correction_factor()); } catch (_) { corr = 1.0; }
       if (!Number.isFinite(corr)) corr = 1.0;
@@ -842,7 +846,20 @@ class CoreDAQ {
     return [Number(this._silicon_log_vy_v_per_decade), Number(this._silicon_log_iz_a)];
   }
 
-  _convert_log_voltage_to_power_w(v_volts, head_idx = 1) {
+  _get_log_lut_for_head_index(headIdx) {
+    const idx = Number(headIdx);
+    if (!Number.isInteger(idx) || idx < 0 || idx >= CoreDAQ.NUM_HEADS) {
+      throw new Error('head index must be 0..3');
+    }
+    const xs = this._loglut_V_V_by_head[idx] || (idx === 0 ? this._loglut_V_V : null);
+    const ys = this._loglut_log10P_by_head[idx] || (idx === 0 ? this._loglut_log10P : null);
+    if (!xs || !ys || xs.length === 0 || xs.length !== ys.length) {
+      throw new CoreDAQError(`LOG LUT not loaded for head ${idx + 1}`);
+    }
+    return [xs, ys];
+  }
+
+  _convert_log_voltage_to_power_w(v_volts, head_idx = 0) {
     if (this._detector_type === CoreDAQ.DETECTOR_SILICON) {
       const resp = this._interp_responsivity_aw(CoreDAQ.DETECTOR_SILICON, this._wavelength_nm);
       if (!(resp > 0.0)) {
@@ -852,7 +869,7 @@ class CoreDAQ {
       return Number(pinW);
     }
 
-    let pinW = Number(this.voltage_to_power_W(Number(v_volts), head_idx));
+    let pinW = Number(this.voltage_to_power_W(Number(v_volts), Number(head_idx) + 1));
     if (this._detector_type === CoreDAQ.DETECTOR_INGAAS) {
       pinW *= this._ingaas_responsivity_correction_factor();
     }
@@ -1131,162 +1148,102 @@ class CoreDAQ {
     }
   }
 
-  _normalizeHeadIndex(headIdx, context = 'head') {
-    const idx = Number.parseInt(String(headIdx), 10);
-    if (!Number.isFinite(idx) || idx < 1 || idx > CoreDAQ.NUM_HEADS) {
-      throw new CoreDAQError(`${context} must be 1..${CoreDAQ.NUM_HEADS}`);
-    }
-    return idx - 1;
-  }
-
-  _getLogLutByHead(headIdx, context = 'LOG LUT') {
-    const i = this._normalizeHeadIndex(headIdx, context);
-    const lut = this._loglutByHead[i] || this._loglutByHead[0];
-    if (!lut || !Array.isArray(lut.V_V) || !Array.isArray(lut.log10P) || lut.V_V.length === 0) {
-      throw new CoreDAQError('LOG LUT not loaded');
-    }
-    if (lut.V_V.length !== lut.log10P.length) {
-      throw new CoreDAQError('LOG LUT length mismatch');
-    }
-    return lut;
-  }
-
-  async _read_log_lut_no_lock(head) {
-    this._rxBuffer = Buffer.alloc(0);
-    await this._applyInterCommandGapNoLock();
-    await this._writelnNoLock(`LOGCAL ${head}`);
-
-    let header = null;
-    for (let i = 0; i < 120; i += 1) {
-      const line = await this._tryReadlineNoLock(this._timeoutMs);
-      if (!line) continue;
-      if (line.startsWith('OK') && line.includes(' N=') && line.includes(' RB=')) {
-        header = line;
-        break;
-      }
-    }
-
-    if (!header) {
-      throw new CoreDAQError(`LOGCAL header not received for head ${head}`);
-    }
-
-    const parts = header.split(/\s+/g);
-    let nPts = null;
-    let rb = null;
-    for (const token of parts) {
-      if (token.startsWith('N=')) nPts = Number.parseInt(token.slice(2), 10);
-      if (token.startsWith('RB=')) rb = Number.parseInt(token.slice(3), 10);
-    }
-
-    if (!Number.isFinite(nPts) || !Number.isFinite(rb)) {
-      throw new CoreDAQError(`Malformed LOGCAL header: ${header}`);
-    }
-    if (rb !== 6) {
-      throw new CoreDAQError(`Unexpected LOGCAL RB=${rb} (expected 6)`);
-    }
-
-    const payloadLen = nPts * rb;
-    const payload = await this._readExactNoLock(payloadLen, this._timeoutMs * 4, Math.max(5000, payloadLen * 8));
-    if (payload.length !== payloadLen) {
-      throw new CoreDAQError(`Short LOGCAL payload: got ${payload.length} / ${payloadLen}`);
-    }
-
-    let doneOk = false;
-    for (let i = 0; i < 120; i += 1) {
-      const line = await this._tryReadlineNoLock(this._timeoutMs);
-      if (!line) continue;
-      if (line === 'OK DONE') {
-        doneOk = true;
-        break;
-      }
-    }
-    if (!doneOk) {
-      throw new CoreDAQError('LOGCAL missing OK DONE terminator');
-    }
-
-    const vs = [];
-    const qs = [];
-    for (let i = 0; i < nPts; i += 1) {
-      const base = i * rb;
-      vs.push(payload.readUInt16LE(base));
-      qs.push(payload.readInt32LE(base + 2));
-    }
-
-    const headMatch = header.match(/(?:^|\s)H=?([0-9]+)/i);
-    const headerHead = headMatch ? Number.parseInt(headMatch[1], 10) : Number(head);
-    return {
-      requestedHead: Number(head),
-      headerHead: Number.isFinite(headerHead) ? headerHead : Number(head),
-      V_mV: vs,
-      log10P_Q16: qs,
-    };
-  }
-
   async _load_log_calibration() {
-    const loaded = await this._withLock(async () => {
-      const out = new Array(CoreDAQ.NUM_HEADS).fill(null);
-      let ch1 = null;
-
+    const byHead = await this._withLock(async () => {
+      const loaded = new Array(CoreDAQ.NUM_HEADS);
       for (let head = 1; head <= CoreDAQ.NUM_HEADS; head += 1) {
-        try {
-          const one = await this._read_log_lut_no_lock(head);
-          out[head - 1] = one;
-          if (head === 1) ch1 = one;
-        } catch (err) {
-          if (head === 1) {
-            throw err;
+        this._rxBuffer = Buffer.alloc(0);
+        await this._applyInterCommandGapNoLock();
+        await this._writelnNoLock(`LOGCAL ${head}`);
+
+        let header = null;
+        for (let i = 0; i < 120; i += 1) {
+          const line = await this._tryReadlineNoLock(this._timeoutMs);
+          if (!line) continue;
+          if (line.startsWith('OK') && line.includes(' N=') && line.includes(' RB=') && line.includes(' H')) {
+            header = line;
+            break;
           }
-          if (!ch1) {
-            throw err;
-          }
-          this._warn(
-            `LOGCAL head ${head} unavailable; reusing head 1 LUT (${String(err?.message || err)})`,
-          );
-          out[head - 1] = {
-            requestedHead: head,
-            headerHead: ch1.headerHead,
-            V_mV: [...ch1.V_mV],
-            log10P_Q16: [...ch1.log10P_Q16],
-          };
         }
+
+        if (!header) {
+          throw new CoreDAQError(`LOGCAL header not received for head ${head}`);
+        }
+
+        const parts = header.split(/\s+/g);
+        let headerHead = null;
+        let nPts = null;
+        let rb = null;
+        for (const token of parts) {
+          if (/^H\d+$/.test(token)) headerHead = Number.parseInt(token.slice(1), 10);
+          if (token.startsWith('N=')) nPts = Number.parseInt(token.slice(2), 10);
+          if (token.startsWith('RB=')) rb = Number.parseInt(token.slice(3), 10);
+        }
+
+        if (!Number.isFinite(headerHead) || headerHead !== head || !Number.isFinite(nPts) || !Number.isFinite(rb)) {
+          throw new CoreDAQError(`Malformed LOGCAL header: ${header}`);
+        }
+        if (rb !== 6) {
+          throw new CoreDAQError(`Unexpected LOGCAL RB=${rb} (expected 6)`);
+        }
+
+        const payloadLen = nPts * rb;
+        const payload = await this._readExactNoLock(payloadLen, this._timeoutMs * 4, Math.max(5000, payloadLen * 8));
+        if (payload.length !== payloadLen) {
+          throw new CoreDAQError(`Short LOGCAL payload for head ${head}: got ${payload.length} / ${payloadLen}`);
+        }
+
+        let doneOk = false;
+        for (let i = 0; i < 120; i += 1) {
+          const line = await this._tryReadlineNoLock(this._timeoutMs);
+          if (!line) continue;
+          if (line === 'OK DONE') {
+            doneOk = true;
+            break;
+          }
+        }
+        if (!doneOk) {
+          throw new CoreDAQError(`LOGCAL missing OK DONE terminator for head ${head}`);
+        }
+
+        const vs = [];
+        const qs = [];
+        for (let i = 0; i < nPts; i += 1) {
+          const base = i * rb;
+          vs.push(payload.readUInt16LE(base));
+          qs.push(payload.readInt32LE(base + 2));
+        }
+        if (vs.length === 0) {
+          throw new CoreDAQError(`LOG LUT empty for head ${head}`);
+        }
+        loaded[head - 1] = { V_mV: vs, Q16: qs };
       }
-      return out;
+      return loaded;
     });
 
-    for (let h = 0; h < CoreDAQ.NUM_HEADS; h += 1) {
-      const row = loaded[h] || loaded[0];
-      if (!row || !Array.isArray(row.V_mV) || row.V_mV.length === 0) {
-        throw new CoreDAQError(`LOG LUT empty for head ${h + 1}`);
+    this._loglut_V_mV_by_head = byHead.map((entry) => entry.V_mV.map((v) => Number(v)));
+    this._loglut_log10P_Q16_by_head = byHead.map((entry) => entry.Q16.map((v) => Number(v)));
+    this._loglut_V_V_by_head = this._loglut_V_mV_by_head.map((vs) => vs.map((v) => v / 1000.0));
+    this._loglut_log10P_by_head = this._loglut_log10P_Q16_by_head.map((qs) => qs.map((v) => v / 65536.0));
+
+    for (let headIdx = 0; headIdx < CoreDAQ.NUM_HEADS; headIdx += 1) {
+      const xs = this._loglut_V_V_by_head[headIdx];
+      const ys = this._loglut_log10P_by_head[headIdx];
+      if (!xs || !ys || xs.length !== ys.length || xs.length === 0) {
+        throw new CoreDAQError(`LOG LUT length mismatch after decode for head ${headIdx + 1}`);
       }
-      const v_mV = row.V_mV.map((v) => Number(v));
-      const q16 = row.log10P_Q16.map((v) => Number(v));
-      const v_v = v_mV.map((v) => v / 1000.0);
-      const log10 = q16.map((v) => v / 65536.0);
-      if (v_v.length !== log10.length) {
-        throw new CoreDAQError(`LOG LUT length mismatch for head ${h + 1}`);
-      }
-      this._loglutByHead[h] = {
-        V_mV: v_mV,
-        log10P_Q16: q16,
-        V_V: v_v,
-        log10P: log10,
-      };
     }
 
-    const ch1 = this._loglutByHead[0];
-    this._loglut_V_mV = [...ch1.V_mV];
-    this._loglut_log10P_Q16 = [...ch1.log10P_Q16];
-    this._loglut_V_V = [...ch1.V_V];
-    this._loglut_log10P = [...ch1.log10P];
-    this._rebuildFastTables();
+    this._loglut_V_mV = this._loglut_V_mV_by_head[0];
+    this._loglut_log10P_Q16 = this._loglut_log10P_Q16_by_head[0];
+    this._loglut_V_V = this._loglut_V_V_by_head[0];
+    this._loglut_log10P = this._loglut_log10P_by_head[0];
   }
 
-  voltage_to_power_W(v_volts, head_idx = 1) {
+  voltage_to_power_W(v_volts, head = 1) {
     this._require_frontend(CoreDAQ.FRONTEND_LOG, 'voltage_to_power_W');
-    const lut = this._getLogLutByHead(head_idx, 'voltage_to_power_W');
-
-    const xs = lut.V_V;
-    const ys = lut.log10P;
+    const headIdx = Number(head) - 1;
+    const [xs, ys] = this._get_log_lut_for_head_index(headIdx);
 
     const interpOne = (x) => {
       if (x <= xs[0]) return 10.0 ** ys[0];
@@ -1393,7 +1350,7 @@ class CoreDAQ {
     await this.ready();
 
     if (this._frontend_type === CoreDAQ.FRONTEND_LOG) {
-      const [mv, gains] = await this.snapshot_mV(n_frames, timeout_s, poll_hz, null);
+      const [mv] = await this.snapshot_mV(n_frames, timeout_s, poll_hz, null);
       const out = [];
       const db = log_deadband_mV === null ? this._log_deadband_mV : Number(log_deadband_mV);
 
@@ -1404,11 +1361,8 @@ class CoreDAQ {
           continue;
         }
         const v = mvCorr / 1000.0;
-        const pW = this._convert_log_voltage_to_power_w(v, ch + 1);
+        const pW = this._convert_log_voltage_to_power_w(v, ch);
         out.push(Number(pW.toFixed(CoreDAQ.POWER_OUTPUT_DECIMALS_MAX)));
-      }
-      if (return_debug) {
-        return [out, mv, gains];
       }
       return out;
     }
@@ -1853,8 +1807,8 @@ class CoreDAQ {
       if (this._detector_type === CoreDAQ.DETECTOR_INGAAS) {
         const corr = Number(this._fastLogCorr);
         for (let chIdx = 0; chIdx < 4; chIdx += 1) {
-          const xs = this._fastLoglutVByHead[chIdx] || this._fastLoglutVByHead[0] || this._fastLoglutV;
-          const ys = this._fastLoglutLog10PByHead[chIdx] || this._fastLoglutLog10PByHead[0] || this._fastLoglutLog10P;
+          const xs = this._fastLoglutVByHead[chIdx] || this._fastLoglutV;
+          const ys = this._fastLoglutLog10PByHead[chIdx] || this._fastLoglutLog10P;
           if (!xs || !ys) throw new CoreDAQError(`LOG LUT not loaded for head ${chIdx + 1}`);
           const codes = ch[chIdx];
           const out = new Array(nFrames);
@@ -2171,7 +2125,6 @@ module.exports = {
   CoreDAQ,
   CoreDAQError,
 };
-
 
 
 

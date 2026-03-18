@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # coredaq_py_api.py  v3.2
 # High-level driver for coreDAQ
 #
@@ -66,22 +66,22 @@ class CoreDAQ:
     GAIN_MAX_POWER_W = [
         5e-3,      # G0: 5 mW
         1e-3,      # G1: 1 mW
-        500e-6,    # G2: 500 ÂµW
-        100e-6,    # G3: 100 ÂµW
-        50e-6,     # G4: 50 ÂµW
-        10e-6,     # G5: 10 ÂµW
-        5e-6,      # G6: 5 ÂµW
+        500e-6,    # G2: 500 uW
+        100e-6,    # G3: 100 uW
+        50e-6,     # G4: 50 uW
+        10e-6,     # G5: 10 uW
+        5e-6,      # G6: 5 uW
         500e-9,    # G7: 500 nW
     ]
 
     GAIN_LABELS = [
         "5 mW",
         "1 mW",
-        "500 ÂµW",
-        "100 ÂµW",
-        "50 ÂµW",
-        "10 ÂµW",
-        "5 ÂµW",
+        "500 uW",
+        "100 uW",
+        "50 uW",
+        "10 uW",
+        "5 uW",
         "500 nW",
     ]
 
@@ -135,20 +135,14 @@ class CoreDAQ:
         self._linear_zero_adc: List[int] = [0, 0, 0, 0]
 
         # ====== LOG LUT storage ======
-        self._loglut_by_head: List[Dict[str, object]] = [
-            {
-                "V_V": None,
-                "log10P": None,
-                "V_mV": None,
-                "log10P_Q16": None,
-            }
-            for _ in range(self.NUM_HEADS)
-        ]
-        # Backward-compatible aliases for channel 1 LUT.
         self._loglut_V_V: Optional[List[float]] = None
         self._loglut_log10P: Optional[List[float]] = None
         self._loglut_V_mV: Optional[List[int]] = None
         self._loglut_log10P_Q16: Optional[List[int]] = None
+        self._loglut_V_V_by_head: List[Optional[List[float]]] = [None for _ in range(self.NUM_HEADS)]
+        self._loglut_log10P_by_head: List[Optional[List[float]]] = [None for _ in range(self.NUM_HEADS)]
+        self._loglut_V_mV_by_head: List[Optional[List[int]]] = [None for _ in range(self.NUM_HEADS)]
+        self._loglut_log10P_Q16_by_head: List[Optional[List[int]]] = [None for _ in range(self.NUM_HEADS)]
 
         # ====== v3.1: LOG deadband (mV), independent of zeroing ======
         self._log_deadband_mV: float = 300.0  # default; change via set_log_deadband_mV()
@@ -512,7 +506,7 @@ class CoreDAQ:
     def get_silicon_log_model(self) -> Tuple[float, float]:
         return float(self._silicon_log_vy_v_per_decade), float(self._silicon_log_iz_a)
 
-    def _convert_log_voltage_to_power_w(self, v_volts: float, head_idx: int = 1) -> float:
+    def _convert_log_voltage_to_power_w(self, v_volts: float, head_idx: int = 0) -> float:
         if self._detector_type == self.DETECTOR_SILICON:
             # ADL5303 model:
             #   Vout = VY * log10(S * Pin / IZ)
@@ -523,7 +517,7 @@ class CoreDAQ:
             pin_w = (self._silicon_log_iz_a / resp) * (10.0 ** (float(v_volts) / self._silicon_log_vy_v_per_decade))
             return float(pin_w)
 
-        pin_w = float(self.voltage_to_power_W(float(v_volts), head_idx=head_idx))
+        pin_w = float(self.voltage_to_power_W(float(v_volts), head=int(head_idx) + 1))
         if self._detector_type == self.DETECTOR_INGAAS:
             pin_w *= self._ingaas_responsivity_correction_factor()
         return pin_w
@@ -842,173 +836,109 @@ class CoreDAQ:
                 self._cal_slope[head - 1][gain] = float(slope)
                 self._cal_intercept[head - 1][gain] = float(intercept)
 
-    def _normalize_head_index(self, head_idx: int, context: str = "head") -> int:
-        try:
-            idx = int(head_idx)
-        except Exception as e:
-            raise CoreDAQError(f"{context} must be 1..{self.NUM_HEADS}") from e
-        if idx < 1 or idx > self.NUM_HEADS:
-            raise CoreDAQError(f"{context} must be 1..{self.NUM_HEADS}")
-        return idx - 1
-
-    def _get_log_lut_by_head(self, head_idx: int, context: str = "LOG LUT") -> Tuple[List[float], List[float]]:
-        i = self._normalize_head_index(head_idx, context)
-        lut = self._loglut_by_head[i] if i < len(self._loglut_by_head) else None
-        if not isinstance(lut, dict) or not isinstance(lut.get("V_V"), list) or not isinstance(lut.get("log10P"), list):
-            lut = self._loglut_by_head[0] if self._loglut_by_head else None
-        if not isinstance(lut, dict) or not isinstance(lut.get("V_V"), list) or not isinstance(lut.get("log10P"), list):
-            raise CoreDAQError("LOG LUT not loaded")
-
-        xs = lut.get("V_V")
-        ys = lut.get("log10P")
-        if not isinstance(xs, list) or not isinstance(ys, list) or len(xs) == 0:
-            raise CoreDAQError("LOG LUT not loaded")
-        if len(xs) != len(ys):
-            raise CoreDAQError("LOG LUT length mismatch")
+    def _get_log_lut_for_head_index(self, head_idx: int) -> Tuple[List[float], List[float]]:
+        idx = int(head_idx)
+        if idx < 0 or idx >= self.NUM_HEADS:
+            raise ValueError("head_idx must be 0..3")
+        xs = self._loglut_V_V_by_head[idx] or (self._loglut_V_V if idx == 0 else None)
+        ys = self._loglut_log10P_by_head[idx] or (self._loglut_log10P if idx == 0 else None)
+        if xs is None or ys is None or len(xs) == 0 or len(xs) != len(ys):
+            raise CoreDAQError(f"LOG LUT not loaded for head {idx + 1}")
         return xs, ys
 
-    def _read_log_lut_no_lock(self, head: int) -> Dict[str, object]:
-        self._ser.reset_input_buffer()
-
-        if self._inter_command_gap_s > 0.0 and self._last_command_ts > 0.0:
-            dt = time.perf_counter() - self._last_command_ts
-            if dt < self._inter_command_gap_s:
-                time.sleep(self._inter_command_gap_s - dt)
-
-        self._writeln(f"LOGCAL {head}")
-        self._last_command_ts = time.perf_counter()
-
-        header = None
-        for _ in range(120):
-            raw = self._ser.readline()
-            if not raw:
-                continue
-            line = raw.decode("ascii", "ignore").strip()
-            if line.startswith("OK") and (" N=" in line) and (" RB=" in line):
-                header = line
-                break
-
-        if not header:
-            raise CoreDAQError(f"LOGCAL header not received for head {head}")
-
-        parts = header.split()
-        n_pts = None
-        rb = None
-        for token in parts:
-            if token.startswith("N="):
-                try:
-                    n_pts = int(token.split("=", 1)[1])
-                except Exception:
-                    n_pts = None
-            elif token.startswith("RB="):
-                try:
-                    rb = int(token.split("=", 1)[1])
-                except Exception:
-                    rb = None
-
-        if n_pts is None or rb is None:
-            raise CoreDAQError(f"Malformed LOGCAL header: {header!r}")
-        if rb != 6:
-            raise CoreDAQError(f"Unexpected LOGCAL RB={rb} (expected 6)")
-
-        payload_len = n_pts * rb
-        payload = self._ser.read(payload_len)
-        if len(payload) != payload_len:
-            raise CoreDAQError(f"Short LOGCAL payload: got {len(payload)} / {payload_len}")
-
-        done_ok = False
-        for _ in range(120):
-            raw = self._ser.readline()
-            if not raw:
-                continue
-            line = raw.decode("ascii", "ignore").strip()
-            if line == "OK DONE":
-                done_ok = True
-                break
-        if not done_ok:
-            raise CoreDAQError("LOGCAL missing OK DONE terminator")
-
-        v_mV: List[int] = []
-        q16: List[int] = []
-        for i in range(n_pts):
-            v, q = struct.unpack_from("<Hi", payload, i * rb)
-            v_mV.append(int(v))
-            q16.append(int(q))
-
-        header_head = int(head)
-        m = re.search(r"(?:^|\s)H=?([0-9]+)", header, flags=re.IGNORECASE)
-        if m:
-            try:
-                header_head = int(m.group(1))
-            except Exception:
-                header_head = int(head)
-
-        return {
-            "requestedHead": int(head),
-            "headerHead": int(header_head),
-            "V_mV": v_mV,
-            "log10P_Q16": q16,
-        }
-
     def _load_log_calibration(self):
+        """
+        Pull per-head log LUTs via:
+          LOGCAL <head>
+
+        Stream:
+          OK H<head> N=<n_pts> RB=<rec_bytes>
+          <binary payload n_pts*RB>
+          OK DONE
+
+        Record = little-endian <Hi:
+          uint16 V_mV
+          int32  log10P_Q16
+        """
+        loaded = []
         with self._lock:
-            loaded: List[Optional[Dict[str, object]]] = [None] * self.NUM_HEADS
-            ch1: Optional[Dict[str, object]] = None
-
             for head in range(1, self.NUM_HEADS + 1):
+                self._ser.reset_input_buffer()
+                self._writeln(f"LOGCAL {head}")
+
+                header = None
+                for _ in range(120):
+                    raw = self._ser.readline()
+                    if not raw:
+                        continue
+                    line = raw.decode("ascii", "ignore").strip()
+                    if line.startswith("OK") and (" N=" in line) and (" RB=" in line) and (" H" in line):
+                        header = line
+                        break
+
+                if not header:
+                    raise CoreDAQError(f"LOGCAL header not received for head {head}")
+
+                parts = header.split()
                 try:
-                    one = self._read_log_lut_no_lock(head)
-                except Exception as e:
-                    if head == 1 or ch1 is None:
-                        raise
-                    warnings.warn(
-                        f"LOGCAL head {head} unavailable; reusing head 1 LUT ({e})",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
-                    one = {
-                        "requestedHead": int(head),
-                        "headerHead": int(ch1.get("headerHead", 1)),
-                        "V_mV": list(ch1.get("V_mV", [])),
-                        "log10P_Q16": list(ch1.get("log10P_Q16", [])),
-                    }
+                    header_head = int([t for t in parts if re.fullmatch(r"H\d+", t)][0][1:])
+                    n_pts = int([t for t in parts if t.startswith("N=")][0].split("=", 1)[1])
+                    rb = int([t for t in parts if t.startswith("RB=")][0].split("=", 1)[1])
+                except Exception:
+                    raise CoreDAQError(f"Malformed LOGCAL header: {header!r}")
 
-                loaded[head - 1] = one
-                if head == 1:
-                    ch1 = one
+                if header_head != head:
+                    raise CoreDAQError(f"LOGCAL head mismatch: expected H{head}, got H{header_head}")
+                if rb != 6:
+                    raise CoreDAQError(f"Unexpected LOGCAL RB={rb} (expected 6)")
 
-        for h in range(self.NUM_HEADS):
-            row = loaded[h] if loaded[h] is not None else loaded[0]
-            if row is None:
-                raise CoreDAQError(f"LOG LUT empty for head {h + 1}")
+                payload_len = n_pts * rb
+                payload = self._ser.read(payload_len)
+                if len(payload) != payload_len:
+                    raise CoreDAQError(f"Short LOGCAL payload for head {head}: got {len(payload)} / {payload_len}")
 
-            v_mV = [int(v) for v in row.get("V_mV", [])]  # type: ignore[arg-type]
-            q16 = [int(v) for v in row.get("log10P_Q16", [])]  # type: ignore[arg-type]
-            if len(v_mV) == 0:
-                raise CoreDAQError(f"LOG LUT empty for head {h + 1}")
+                done_ok = False
+                for _ in range(120):
+                    raw = self._ser.readline()
+                    if not raw:
+                        continue
+                    line = raw.decode("ascii", "ignore").strip()
+                    if line == "OK DONE":
+                        done_ok = True
+                        break
+                if not done_ok:
+                    raise CoreDAQError(f"LOGCAL missing OK DONE terminator for head {head}")
 
-            v_v = [float(v) / 1000.0 for v in v_mV]
-            log10p = [float(q) / 65536.0 for q in q16]
-            if len(v_v) != len(log10p):
-                raise CoreDAQError(f"LOG LUT length mismatch for head {h + 1}")
+                v_mv: List[int] = []
+                q16: List[int] = []
+                for i in range(n_pts):
+                    v, q = struct.unpack_from("<Hi", payload, i * rb)
+                    v_mv.append(int(v))
+                    q16.append(int(q))
+                if not v_mv:
+                    raise CoreDAQError(f"LOG LUT empty for head {head}")
+                loaded.append((v_mv, q16))
 
-            self._loglut_by_head[h] = {
-                "V_mV": v_mV,
-                "log10P_Q16": q16,
-                "V_V": v_v,
-                "log10P": log10p,
-            }
+        self._loglut_V_mV_by_head = [vals for vals, _ in loaded]
+        self._loglut_log10P_Q16_by_head = [vals for _, vals in loaded]
+        self._loglut_V_V_by_head = [[v / 1000.0 for v in vals] for vals, _ in loaded]
+        self._loglut_log10P_by_head = [[q / 65536.0 for q in vals] for _, vals in loaded]
 
-        ch1_lut = self._loglut_by_head[0]
-        self._loglut_V_mV = list(ch1_lut["V_mV"])
-        self._loglut_log10P_Q16 = list(ch1_lut["log10P_Q16"])
-        self._loglut_V_V = list(ch1_lut["V_V"])
-        self._loglut_log10P = list(ch1_lut["log10P"])
+        for head_idx in range(self.NUM_HEADS):
+            xs = self._loglut_V_V_by_head[head_idx]
+            ys = self._loglut_log10P_by_head[head_idx]
+            if xs is None or ys is None or len(xs) != len(ys) or len(xs) == 0:
+                raise CoreDAQError(f"LOG LUT length mismatch after decode for head {head_idx + 1}")
+
+        self._loglut_V_mV = self._loglut_V_mV_by_head[0]
+        self._loglut_log10P_Q16 = self._loglut_log10P_Q16_by_head[0]
+        self._loglut_V_V = self._loglut_V_V_by_head[0]
+        self._loglut_log10P = self._loglut_log10P_by_head[0]
 
     # ---------- LOG conversion (volts -> power) ----------
-    def voltage_to_power_W(self, v_volts: NumOrSeq, head_idx: int = 1):
+    def voltage_to_power_W(self, v_volts: NumOrSeq, head: int = 1):
         self._require_frontend(self.FRONTEND_LOG, "voltage_to_power_W")
-        xs, ys = self._get_log_lut_by_head(head_idx, "voltage_to_power_W")
+        xs, ys = self._get_log_lut_for_head_index(int(head) - 1)
 
         def interp_one(x: float) -> float:
             if x <= xs[0]:
@@ -1150,7 +1080,7 @@ class CoreDAQ:
                     out.append(0.0)
                     continue
                 v = mv_corr / 1000.0
-                p_w = self._convert_log_voltage_to_power_w(v, ch + 1)
+                p_w = self._convert_log_voltage_to_power_w(v, head_idx=ch)
                 out.append(round(p_w, self.POWER_OUTPUT_DECIMALS_MAX))
             return out
 
@@ -1547,7 +1477,7 @@ class CoreDAQ:
                     if db > 0.0 and abs(mv_equiv) < db:
                         out_list.append(0.0)
                     else:
-                        p_w = self._convert_log_voltage_to_power_w(float(v), ch_idx + 1)
+                        p_w = self._convert_log_voltage_to_power_w(float(v), head_idx=ch_idx)
                         out_list.append(round(p_w, self.POWER_OUTPUT_DECIMALS_MAX))
             return power_ch
 
