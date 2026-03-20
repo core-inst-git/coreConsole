@@ -184,6 +184,18 @@ function detectDetectorTypeFromIdn(idn) {
   return CoreDAQ.DETECTOR_INGAAS;
 }
 
+function detectGainProfile(idn, frontendType) {
+  if (typeof CoreDAQ.gainProfileFromIdn === 'function') {
+    return CoreDAQ.gainProfileFromIdn(idn, frontendType);
+  }
+  const txt = String(idn || '').toUpperCase();
+  const frontend = String(frontendType || '').toUpperCase();
+  if (frontend === CoreDAQ.FRONTEND_LINEAR && (txt.includes('LINEAR_LEGACY') || (txt.includes('LINEAR') && txt.includes('LEGACY')))) {
+    return 'linear_legacy';
+  }
+  return 'standard';
+}
+
 function defaultWavelengthNm(detectorType) {
   return detectorType === CoreDAQ.DETECTOR_SILICON ? 775.0 : 1550.0;
 }
@@ -906,6 +918,8 @@ class CoreDAQBackend {
       idn: s.idn,
       frontend_type: s.frontend_type,
       detector_type: s.detector_type,
+      gain_profile: s.gain_profile || 'standard',
+      legacy_firmware: !!s.legacy_firmware,
       unsupported_firmware: false,
       unsupported_reason: null,
       freq_hz: s.freq_hz,
@@ -1145,6 +1159,8 @@ class CoreDAQBackend {
       idn,
       frontend_type: frontendType,
       detector_type: CoreDAQ.DETECTOR_INGAAS,
+      gain_profile: detectGainProfile(idn, frontendType),
+      legacy_firmware: false,
       wavelength_nm: null,
       wavelength_min_nm: null,
       wavelength_max_nm: null,
@@ -1169,6 +1185,7 @@ class CoreDAQBackend {
     } catch (_) {
       s.detector_type = detectDetectorTypeFromIdn(idn);
     }
+    s.legacy_firmware = s.gain_profile === 'linear_legacy';
 
     try {
       dev.set_detector_type(s.detector_type);
@@ -1419,6 +1436,8 @@ class CoreDAQBackend {
           port: active ? active.port : null,
           idn: active ? active.idn : null,
           detector_type: active ? active.detector_type : null,
+          gain_profile: active ? active.gain_profile : 'standard',
+          legacy_firmware: active ? !!active.legacy_firmware : false,
           freq_hz: active ? active.freq_hz : null,
           os_idx: active ? active.os_idx : null,
           wavelength_nm: active ? active.wavelength_nm : null,

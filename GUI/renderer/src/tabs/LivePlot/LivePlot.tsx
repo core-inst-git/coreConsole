@@ -255,6 +255,7 @@ export default function LivePlot({
   }, [activeDevice]);
 
   const autoGain = !!activeDevice?.autogain;
+  const gainProfile = activeDevice?.gain_profile || 'standard';
   const freqHz = typeof activeDevice?.freq_hz === 'number' ? activeDevice.freq_hz : null;
   const osIdx = typeof activeDevice?.os_idx === 'number' ? activeDevice.os_idx : null;
   const dieTempC = typeof activeDevice?.die_temp_c === 'number' ? activeDevice.die_temp_c : null;
@@ -572,7 +573,7 @@ export default function LivePlot({
                     >
                       {Array.from({ length: 8 }).map((__, g) => (
                         <option key={`gain-${idx}-${g}`} value={g}>
-                          {gainDisplayLabel(g)}
+                          {gainDisplayLabel(g, gainProfile)}
                         </option>
                       ))}
                     </select>

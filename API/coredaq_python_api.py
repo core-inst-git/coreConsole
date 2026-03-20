@@ -62,6 +62,9 @@ class CoreDAQ:
     INGAAS_WAVELENGTH_RANGE_NM = (910.0, 1700.0)
     SILICON_WAVELENGTH_RANGE_NM = (400.0, 1100.0)
 
+    GAIN_PROFILE_STANDARD = "standard"
+    GAIN_PROFILE_LINEAR_LEGACY = "linear_legacy"
+
     # Nominal maximum recommended optical power per gain (watts), UI guidance only
     GAIN_MAX_POWER_W = [
         5e-3,      # G0: 5 mW
@@ -74,6 +77,17 @@ class CoreDAQ:
         500e-9,    # G7: 500 nW
     ]
 
+    LEGACY_LINEAR_GAIN_MAX_POWER_W = [
+        3.5e-3,    # G0: 3.5 mW
+        1.5e-3,    # G1: 1.5 mW
+        750e-6,    # G2: 750 uW
+        350e-6,    # G3: 350 uW
+        75e-6,     # G4: 75 uW
+        35e-6,     # G5: 35 uW
+        3.5e-6,    # G6: 3.5 uW
+        350e-9,    # G7: 350 nW
+    ]
+
     GAIN_LABELS = [
         "5 mW",
         "1 mW",
@@ -84,6 +98,43 @@ class CoreDAQ:
         "5 uW",
         "500 nW",
     ]
+
+    LEGACY_LINEAR_GAIN_LABELS = [
+        "3.5 mW",
+        "1.5 mW",
+        "750 uW",
+        "350 uW",
+        "75 uW",
+        "35 uW",
+        "3.5 uW",
+        "350 nW",
+    ]
+
+    @classmethod
+    def gain_profile_from_idn(cls, idn_payload: str = "", frontend_type: str = "") -> str:
+        idn = str(idn_payload or "").upper()
+        frontend = str(frontend_type or "").upper()
+        if frontend == cls.FRONTEND_LINEAR and (("LINEAR_LEGACY" in idn) or ("LINEAR" in idn and "LEGACY" in idn)):
+            return cls.GAIN_PROFILE_LINEAR_LEGACY
+        return cls.GAIN_PROFILE_STANDARD
+
+    @classmethod
+    def gain_max_power_table(cls, gain_profile: str = GAIN_PROFILE_STANDARD) -> List[float]:
+        if gain_profile == cls.GAIN_PROFILE_LINEAR_LEGACY:
+            return list(cls.LEGACY_LINEAR_GAIN_MAX_POWER_W)
+        return list(cls.GAIN_MAX_POWER_W)
+
+    @classmethod
+    def gain_labels(cls, gain_profile: str = GAIN_PROFILE_STANDARD) -> List[str]:
+        if gain_profile == cls.GAIN_PROFILE_LINEAR_LEGACY:
+            return list(cls.LEGACY_LINEAR_GAIN_LABELS)
+        return list(cls.GAIN_LABELS)
+
+    @classmethod
+    def gain_label(cls, gain_index: int, gain_profile: str = GAIN_PROFILE_STANDARD) -> str:
+        labels = cls.gain_labels(gain_profile)
+        idx = max(0, min(len(labels) - 1, int(gain_index or 0)))
+        return labels[idx]
 
     @classmethod
     def _build_default_tia_ohm_table(cls) -> List[List[float]]:
@@ -119,6 +170,7 @@ class CoreDAQ:
         except Exception:
             self._idn_cache = ""
         self._detector_type: str = self._detect_detector_type_once(self._idn_cache)
+        self._gain_profile: str = self.gain_profile_from_idn(self._idn_cache, self._frontend_type)
 
         # LINEAR calibration tables
         self._cal_slope = [[0.0 for _ in range(self.NUM_GAINS)] for _ in range(self.NUM_HEADS)]
@@ -561,7 +613,12 @@ class CoreDAQ:
         if st != "OK":
             raise CoreDAQError(p)
         self._idn_cache = p
+        self._gain_profile = self.gain_profile_from_idn(p, self._frontend_type)
         return p
+
+    def gain_profile(self, refresh: bool = False) -> str:
+        self.idn(refresh=refresh)
+        return self._gain_profile or self.GAIN_PROFILE_STANDARD
 
     # ---------- ADC conversions (raw) ----------
     @classmethod

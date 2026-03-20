@@ -89,6 +89,9 @@ class CoreDAQ {
   static INGAAS_WAVELENGTH_RANGE_NM = [910.0, 1700.0];
   static SILICON_WAVELENGTH_RANGE_NM = [400.0, 1100.0];
 
+  static GAIN_PROFILE_STANDARD = 'standard';
+  static GAIN_PROFILE_LINEAR_LEGACY = 'linear_legacy';
+
   static GAIN_MAX_POWER_W = [
     5e-3,
     1e-3,
@@ -98,6 +101,17 @@ class CoreDAQ {
     10e-6,
     5e-6,
     500e-9,
+  ];
+
+  static LEGACY_LINEAR_GAIN_MAX_POWER_W = [
+    3.5e-3,
+    1.5e-3,
+    750e-6,
+    350e-6,
+    75e-6,
+    35e-6,
+    3.5e-6,
+    350e-9,
   ];
 
   static GAIN_LABELS = [
@@ -110,6 +124,44 @@ class CoreDAQ {
     '5 uW',
     '500 nW',
   ];
+
+  static LEGACY_LINEAR_GAIN_LABELS = [
+    '3.5 mW',
+    '1.5 mW',
+    '750 uW',
+    '350 uW',
+    '75 uW',
+    '35 uW',
+    '3.5 uW',
+    '350 nW',
+  ];
+
+  static gainProfileFromIdn(idnPayload = '', frontendType = '') {
+    const idn = String(idnPayload || '').toUpperCase();
+    const frontend = String(frontendType || '').toUpperCase();
+    if (frontend === CoreDAQ.FRONTEND_LINEAR && (idn.includes('LINEAR_LEGACY') || (idn.includes('LINEAR') && idn.includes('LEGACY')))) {
+      return CoreDAQ.GAIN_PROFILE_LINEAR_LEGACY;
+    }
+    return CoreDAQ.GAIN_PROFILE_STANDARD;
+  }
+
+  static gainMaxPowerTable(gainProfile = CoreDAQ.GAIN_PROFILE_STANDARD) {
+    return gainProfile === CoreDAQ.GAIN_PROFILE_LINEAR_LEGACY
+      ? [...CoreDAQ.LEGACY_LINEAR_GAIN_MAX_POWER_W]
+      : [...CoreDAQ.GAIN_MAX_POWER_W];
+  }
+
+  static gainLabels(gainProfile = CoreDAQ.GAIN_PROFILE_STANDARD) {
+    return gainProfile === CoreDAQ.GAIN_PROFILE_LINEAR_LEGACY
+      ? [...CoreDAQ.LEGACY_LINEAR_GAIN_LABELS]
+      : [...CoreDAQ.GAIN_LABELS];
+  }
+
+  static gainLabel(gainIndex, gainProfile = CoreDAQ.GAIN_PROFILE_STANDARD) {
+    const labels = CoreDAQ.gainLabels(gainProfile);
+    const idx = clamp(Number(gainIndex) || 0, 0, labels.length - 1);
+    return labels[idx];
+  }
 
   static _build_default_tia_ohm_table() {
     const perGain = [];
@@ -158,6 +210,7 @@ class CoreDAQ {
     this._frontend_type = '';
     this._idn_cache = '';
     this._detector_type = CoreDAQ.DETECTOR_INGAAS;
+    this._gain_profile = CoreDAQ.GAIN_PROFILE_STANDARD;
 
     this._cal_slope = fill2D(CoreDAQ.NUM_HEADS, CoreDAQ.NUM_GAINS, 0.0);
     this._cal_intercept = fill2D(CoreDAQ.NUM_HEADS, CoreDAQ.NUM_GAINS, 0.0);
@@ -275,6 +328,7 @@ class CoreDAQ {
       this._idn_cache = '';
     }
     this._detector_type = this._detect_detector_type_once(this._idn_cache);
+    this._gain_profile = CoreDAQ.gainProfileFromIdn(this._idn_cache, this._frontend_type);
 
     const [stI2c, payloadI2c] = await this._ask('I2C REFRESH');
     if (stI2c !== 'OK') {
@@ -921,7 +975,13 @@ class CoreDAQ {
     const [st, p] = await this._ask('IDN?');
     if (st !== 'OK') throw new CoreDAQError(p);
     this._idn_cache = p;
+    this._gain_profile = CoreDAQ.gainProfileFromIdn(p, this._frontend_type);
     return p;
+  }
+
+  async gain_profile(refresh = false) {
+    await this.idn(refresh);
+    return this._gain_profile || CoreDAQ.GAIN_PROFILE_STANDARD;
   }
 
   static adc_code_to_volts(code) {

@@ -1,19 +1,42 @@
 export type FrontendType = 'LINEAR' | 'LOG' | string;
 
-export const GAIN_RANGE_LABELS = [
-  '5 mW',
-  '1 mW',
-  '500 uW',
-  '100 uW',
-  '50 uW',
-  '10 uW',
-  '5 uW',
-  '500 nW',
-];
+export const GAIN_PROFILE_STANDARD = 'standard';
+export const GAIN_PROFILE_LINEAR_LEGACY = 'linear_legacy';
 
-export function gainDisplayLabel(gainIndex: number): string {
-  const idx = Math.max(0, Math.min(GAIN_RANGE_LABELS.length - 1, Number(gainIndex) || 0));
-  return GAIN_RANGE_LABELS[idx];
+export type GainProfile = typeof GAIN_PROFILE_STANDARD | typeof GAIN_PROFILE_LINEAR_LEGACY | string;
+
+export const GAIN_RANGE_LABELS_BY_PROFILE: Record<string, string[]> = {
+  [GAIN_PROFILE_STANDARD]: [
+    '5 mW',
+    '1 mW',
+    '500 uW',
+    '100 uW',
+    '50 uW',
+    '10 uW',
+    '5 uW',
+    '500 nW',
+  ],
+  [GAIN_PROFILE_LINEAR_LEGACY]: [
+    '3.5 mW',
+    '1.5 mW',
+    '750 uW',
+    '350 uW',
+    '75 uW',
+    '35 uW',
+    '3.5 uW',
+    '350 nW',
+  ],
+};
+
+export function gainRangeLabels(gainProfile: GainProfile | null | undefined = GAIN_PROFILE_STANDARD): string[] {
+  return GAIN_RANGE_LABELS_BY_PROFILE[String(gainProfile || GAIN_PROFILE_STANDARD)]
+    || GAIN_RANGE_LABELS_BY_PROFILE[GAIN_PROFILE_STANDARD];
+}
+
+export function gainDisplayLabel(gainIndex: number, gainProfile: GainProfile | null | undefined = GAIN_PROFILE_STANDARD): string {
+  const labels = gainRangeLabels(gainProfile);
+  const idx = Math.max(0, Math.min(labels.length - 1, Number(gainIndex) || 0));
+  return labels[idx];
 }
 
 export type DeviceStatus = {
@@ -23,6 +46,8 @@ export type DeviceStatus = {
   idn?: string | null;
   frontend_type?: FrontendType | null;
   detector_type?: string | null;
+  gain_profile?: string | null;
+  legacy_firmware?: boolean;
   unsupported_firmware?: boolean;
   unsupported_reason?: string | null;
   freq_hz?: number | null;
@@ -49,6 +74,8 @@ export type StatusMsg = {
   port?: string | null;
   idn?: string | null;
   detector_type?: string | null;
+  gain_profile?: string | null;
+  legacy_firmware?: boolean;
   unsupported_firmware?: boolean;
   unsupported_reason?: string | null;
   gpib_resource?: string | null;

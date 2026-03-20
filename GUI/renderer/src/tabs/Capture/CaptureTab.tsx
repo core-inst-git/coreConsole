@@ -368,6 +368,7 @@ export default function CaptureTab({
   }, [selectedDevice]);
   const selectedIsLinear = selectedDevice?.frontend_type === 'LINEAR';
   const selectedDetectorType = (selectedDevice?.detector_type || 'INGAAS').toString().toUpperCase();
+  const selectedGainProfile = selectedDevice?.gain_profile || 'standard';
 
 
   useEffect(() => {
@@ -1266,7 +1267,7 @@ export default function CaptureTab({
                     >
                       {[0, 1, 2, 3, 4, 5, 6, 7].map((g) => (
                         <option key={g} value={g}>
-                          {gainDisplayLabel(g)}
+                          {gainDisplayLabel(g, selectedGainProfile)}
                         </option>
                       ))}
                     </select>
