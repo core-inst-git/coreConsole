@@ -86,6 +86,8 @@ class CoreDAQ {
   static DEFAULT_RESPONSIVITY_REF_NM = 1550.0;
   static DEFAULT_SILICON_LOG_VY_V_PER_DECADE = 0.5;
   static DEFAULT_SILICON_LOG_IZ_A = 100e-12;
+  static MAX_INGAAS_LOG_POWER_W = 3e-3;
+  static MIN_INGAAS_LOG_POWER_W = 1e-9;
   static INGAAS_WAVELENGTH_RANGE_NM = [910.0, 1700.0];
   static SILICON_WAVELENGTH_RANGE_NM = [400.0, 1100.0];
 
@@ -228,7 +230,6 @@ class CoreDAQ {
     this._loglut_V_mV_by_head = [null, null, null, null];
     this._loglut_log10P_Q16_by_head = [null, null, null, null];
 
-    this._log_deadband_mV = 300.0;
 
     this._wavelength_nm = CoreDAQ.DEFAULT_WAVELENGTH_NM;
     this._responsivity_ref_nm = CoreDAQ.DEFAULT_RESPONSIVITY_REF_NM;
@@ -913,6 +914,10 @@ class CoreDAQ {
     return [xs, ys];
   }
 
+  _clamp_ingaas_log_power_w(powerW) {
+    return Math.min(Math.max(Number(powerW), CoreDAQ.MIN_INGAAS_LOG_POWER_W), CoreDAQ.MAX_INGAAS_LOG_POWER_W);
+  }
+
   _convert_log_voltage_to_power_w(v_volts, head_idx = 0) {
     if (this._detector_type === CoreDAQ.DETECTOR_SILICON) {
       const resp = this._interp_responsivity_aw(CoreDAQ.DETECTOR_SILICON, this._wavelength_nm);
@@ -926,6 +931,7 @@ class CoreDAQ {
     let pinW = Number(this.voltage_to_power_W(Number(v_volts), Number(head_idx) + 1));
     if (this._detector_type === CoreDAQ.DETECTOR_INGAAS) {
       pinW *= this._ingaas_responsivity_correction_factor();
+      pinW = this._clamp_ingaas_log_power_w(pinW);
     }
     return pinW;
   }
@@ -1141,15 +1147,6 @@ class CoreDAQ {
     return [this._apply_linear_zero_ch(codes), gains];
   }
 
-  set_log_deadband_mV(deadband_mV) {
-    const db = Number(deadband_mV);
-    if (db < 0) throw new Error('deadband_mV must be >= 0');
-    this._log_deadband_mV = db;
-  }
-
-  get_log_deadband_mV() {
-    return Number(this._log_deadband_mV);
-  }
 
   async _load_calibration_for_frontend() {
     // Silicon heads use analytical conversion and do not expose CAL/LOGCAL.
@@ -1300,22 +1297,48 @@ class CoreDAQ {
     this._loglut_log10P = this._loglut_log10P_by_head[0];
   }
 
+  _interp_extrap_log10(xs, ys, x) {
+    if (!xs || !ys || xs.length === 0 || xs.length !== ys.length) {
+      throw new CoreDAQError('Invalid LOG LUT');
+    }
+    if (xs.length === 1) {
+      return Number(ys[0]);
+    }
+
+    if (x <= xs[0]) {
+      const x0 = xs[0];
+      const x1 = xs[1];
+      const y0 = ys[0];
+      const y1 = ys[1];
+      return x1 === x0 ? Number(y0) : Number(y0 + ((x - x0) / (x1 - x0)) * (y1 - y0));
+    }
+    if (x >= xs[xs.length - 1]) {
+      const x0 = xs[xs.length - 2];
+      const x1 = xs[xs.length - 1];
+      const y0 = ys[ys.length - 2];
+      const y1 = ys[ys.length - 1];
+      return x1 === x0 ? Number(y1) : Number(y0 + ((x - x0) / (x1 - x0)) * (y1 - y0));
+    }
+
+    const j = bisectLeft(xs, x);
+    const x0 = xs[j - 1];
+    const x1 = xs[j];
+    const y0 = ys[j - 1];
+    const y1 = ys[j];
+    return x1 === x0 ? Number(y0) : Number(y0 + ((x - x0) / (x1 - x0)) * (y1 - y0));
+  }
+
   voltage_to_power_W(v_volts, head = 1) {
     this._require_frontend(CoreDAQ.FRONTEND_LOG, 'voltage_to_power_W');
     const headIdx = Number(head) - 1;
     const [xs, ys] = this._get_log_lut_for_head_index(headIdx);
 
     const interpOne = (x) => {
-      if (x <= xs[0]) return 10.0 ** ys[0];
-      if (x >= xs[xs.length - 1]) return 10.0 ** ys[ys.length - 1];
-
-      const j = bisectLeft(xs, x);
-      const x0 = xs[j - 1];
-      const x1 = xs[j];
-      const y0 = ys[j - 1];
-      const y1 = ys[j];
-      const y = x1 === x0 ? y0 : y0 + ((x - x0) / (x1 - x0)) * (y1 - y0);
-      return 10.0 ** y;
+      let p = 10.0 ** this._interp_extrap_log10(xs, ys, x);
+      if (this._detector_type === CoreDAQ.DETECTOR_INGAAS) {
+        p = this._clamp_ingaas_log_power_w(p);
+      }
+      return p;
     };
 
     if (Array.isArray(v_volts)) {
@@ -1405,21 +1428,15 @@ class CoreDAQ {
     max_iters = 10,
     settle_s = 0.01,
     return_debug = false,
-    log_deadband_mV = null,
   ) {
     await this.ready();
 
     if (this._frontend_type === CoreDAQ.FRONTEND_LOG) {
       const [mv] = await this.snapshot_mV(n_frames, timeout_s, poll_hz, null);
       const out = [];
-      const db = log_deadband_mV === null ? this._log_deadband_mV : Number(log_deadband_mV);
 
       for (let ch = 0; ch < 4; ch += 1) {
         const mvCorr = Number(mv[ch]);
-        if (db > 0.0 && Math.abs(mvCorr) < db) {
-          out.push(0.0);
-          continue;
-        }
         const v = mvCorr / 1000.0;
         const pW = this._convert_log_voltage_to_power_w(v, ch);
         out.push(Number(pW.toFixed(CoreDAQ.POWER_OUTPUT_DECIMALS_MAX)));
@@ -1735,7 +1752,7 @@ class CoreDAQ {
     return this.transfer_frames_adc(frames);
   }
 
-  async transfer_frames_mV(frames, _use_zero = null, log_deadband_mV = null) {
+  async transfer_frames_mV(frames, _use_zero = null) {
     const ch = await this.transfer_frames_adc(frames);
     const lsbMv = CoreDAQ.ADC_LSB_MV;
 
@@ -1749,13 +1766,9 @@ class CoreDAQ {
     }
 
     if (this._frontend_type === CoreDAQ.FRONTEND_LOG) {
-      const db = log_deadband_mV === null ? this._log_deadband_mV : Number(log_deadband_mV);
       const out = [];
       for (const lst of ch) {
         let mvList = lst.map((x) => Number((Number(x) * lsbMv).toFixed(CoreDAQ.MV_OUTPUT_DECIMALS)));
-        if (db > 0.0) {
-          mvList = mvList.map((v) => (Math.abs(v) < db ? 0.0 : v));
-        }
         out.push(mvList);
       }
       return out;
@@ -1769,7 +1782,7 @@ class CoreDAQ {
     return mv.map((lst) => lst.map((x) => x / 1000.0));
   }
 
-  async transfer_frames_W(frames, _use_zero = null, log_deadband_mV = null) {
+  async transfer_frames_W(frames, _use_zero = null) {
     const nFrames = Number(frames);
     if (!(nFrames > 0)) {
       throw new Error('frames must be > 0');
@@ -1842,7 +1855,6 @@ class CoreDAQ {
 
     if (this._frontend_type === CoreDAQ.FRONTEND_LOG) {
       const ch = await this.transfer_frames_adc(nFrames);
-      const db = log_deadband_mV === null ? this._log_deadband_mV : Number(log_deadband_mV);
       const powerCh = [[], [], [], []];
 
       if (this._detector_type === CoreDAQ.DETECTOR_SILICON) {
@@ -1854,7 +1866,6 @@ class CoreDAQ {
           const mvScale = CoreDAQ.ADC_LSB_MV;
           for (let i = 0; i < nFrames; i += 1) {
             let mv = Number(codes[i]) * mvScale;
-            if (db > 0.0 && Math.abs(mv) < db) { out[i] = 0.0; continue; }
             const v = mv / 1000.0;
             const p = (this._silicon_log_iz_a / resp) * (10.0 ** (v / this._silicon_log_vy_v_per_decade));
             out[i] = Number(p.toFixed(CoreDAQ.POWER_OUTPUT_DECIMALS_MAX));
@@ -1874,28 +1885,12 @@ class CoreDAQ {
           const out = new Array(nFrames);
           const mvScale = CoreDAQ.ADC_LSB_MV;
           for (let i = 0; i < nFrames; i += 1) {
-            let mv = Number(codes[i]) * mvScale;
-            if (db > 0.0 && Math.abs(mv) < db) { out[i] = 0.0; continue; }
+            const mv = Number(codes[i]) * mvScale;
             const v = mv / 1000.0;
-            let y;
-            if (v <= xs[0]) {
-              y = ys[0];
-            } else if (v >= xs[xs.length - 1]) {
-              y = ys[ys.length - 1];
-            } else {
-              // linear interpolation inside LUT range
-              let lo = 0; let hi = xs.length - 1;
-              while (lo < hi - 1) {
-                const mid = (lo + hi) >>> 1;
-                if (xs[mid] <= v) lo = mid; else hi = mid;
-              }
-              const x0 = xs[lo]; const x1 = xs[lo + 1];
-              const y0 = ys[lo]; const y1 = ys[lo + 1];
-              const t = x1 === x0 ? 0.0 : (v - x0) / (x1 - x0);
-              y = y0 + t * (y1 - y0);
-            }
+            const y = this._interp_extrap_log10(xs, ys, v);
             let p = 10.0 ** y;
             if (corr !== 1.0) p *= corr;
+            p = this._clamp_ingaas_log_power_w(p);
             out[i] = Number(p.toFixed(CoreDAQ.POWER_OUTPUT_DECIMALS_MAX));
           }
           powerCh[chIdx] = out;

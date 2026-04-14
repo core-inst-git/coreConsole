@@ -132,9 +132,9 @@ Snapshot CoreDAQ::snapshot_volts(int n_frames, int timeout_ms, int poll_hz) {
     return s;
 }
 
-Snapshot CoreDAQ::snapshot_w(int n_frames, int timeout_ms, int poll_hz, float log_deadband_mv) {
+Snapshot CoreDAQ::snapshot_w(int n_frames, int timeout_ms, int poll_hz) {
     Snapshot s;
-    check(coredaq_snapshot_w(dev_, n_frames, timeout_ms, poll_hz, log_deadband_mv, s.values.data(), s.gains.data()), "snapshot_w");
+    check(coredaq_snapshot_w(dev_, n_frames, timeout_ms, poll_hz, s.values.data(), s.gains.data()), "snapshot_w");
     return s;
 }
 
@@ -154,33 +154,33 @@ void CoreDAQ::wait_for_completion(int timeout_ms, int poll_ms) {
     check(coredaq_wait_for_completion(dev_, timeout_ms, poll_ms), "wait_for_completion");
 }
 
-FrameBlock CoreDAQ::transfer_frames_mv(int frames, float log_deadband_mv) {
+FrameBlock CoreDAQ::transfer_frames_mv(int frames) {
     FrameBlock fb;
     fb.ch1.resize(frames);
     fb.ch2.resize(frames);
     fb.ch3.resize(frames);
     fb.ch4.resize(frames);
-    check(coredaq_transfer_frames_mv(dev_, frames, fb.ch1.data(), fb.ch2.data(), fb.ch3.data(), fb.ch4.data(), static_cast<size_t>(frames), log_deadband_mv), "transfer_frames_mv");
+    check(coredaq_transfer_frames_mv(dev_, frames, fb.ch1.data(), fb.ch2.data(), fb.ch3.data(), fb.ch4.data(), static_cast<size_t>(frames)), "transfer_frames_mv");
     return fb;
 }
 
-FrameBlock CoreDAQ::transfer_frames_volts(int frames, float log_deadband_mv) {
+FrameBlock CoreDAQ::transfer_frames_volts(int frames) {
     FrameBlock fb;
     fb.ch1.resize(frames);
     fb.ch2.resize(frames);
     fb.ch3.resize(frames);
     fb.ch4.resize(frames);
-    check(coredaq_transfer_frames_volts(dev_, frames, fb.ch1.data(), fb.ch2.data(), fb.ch3.data(), fb.ch4.data(), static_cast<size_t>(frames), log_deadband_mv), "transfer_frames_volts");
+    check(coredaq_transfer_frames_volts(dev_, frames, fb.ch1.data(), fb.ch2.data(), fb.ch3.data(), fb.ch4.data(), static_cast<size_t>(frames)), "transfer_frames_volts");
     return fb;
 }
 
-FrameBlock CoreDAQ::transfer_frames_w(int frames, float log_deadband_mv) {
+FrameBlock CoreDAQ::transfer_frames_w(int frames) {
     FrameBlock fb;
     fb.ch1.resize(frames);
     fb.ch2.resize(frames);
     fb.ch3.resize(frames);
     fb.ch4.resize(frames);
-    check(coredaq_transfer_frames_w(dev_, frames, fb.ch1.data(), fb.ch2.data(), fb.ch3.data(), fb.ch4.data(), static_cast<size_t>(frames), log_deadband_mv), "transfer_frames_w");
+    check(coredaq_transfer_frames_w(dev_, frames, fb.ch1.data(), fb.ch2.data(), fb.ch3.data(), fb.ch4.data(), static_cast<size_t>(frames)), "transfer_frames_w");
     return fb;
 }
 

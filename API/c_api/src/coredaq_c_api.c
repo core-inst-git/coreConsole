@@ -27,6 +27,9 @@
 #define STRNICMP _strnicmp
 #endif
 
+#define COREDAQ_MAX_INGAAS_LOG_POWER_W 3e-3
+#define COREDAQ_MIN_INGAAS_LOG_POWER_W 1e-9
+
 struct coredaq_device {
 #ifdef _WIN32
     HANDLE h;
@@ -56,7 +59,6 @@ struct coredaq_device {
     double *log_log10p[COREDAQ_NUM_HEADS];
     int log_cal_loaded;
 
-    float log_deadband_mv;
 };
 
 static void set_error(coredaq_device_t *dev, const char *fmt, ...) {
@@ -503,7 +505,6 @@ coredaq_result_t coredaq_create(coredaq_device_t **out_dev) {
 #endif
     dev->timeout_ms = 150;
     dev->write_timeout_ms = 500;
-    dev->log_deadband_mv = 300.0f;
     snprintf(dev->frontend, sizeof(dev->frontend), "UNKNOWN");
     *out_dev = dev;
     return COREDAQ_OK;
@@ -1008,13 +1009,28 @@ static double interp_log_power(const coredaq_device_t *dev, int ch, double volts
     const double *y;
     int n;
     int lo, hi;
+    double x0, x1, y0, y1, t, v;
     if (!dev || ch < 0 || ch >= 4) return 0.0;
     n = dev->log_n[ch];
     x = dev->log_v[ch];
     y = dev->log_log10p[ch];
     if (!x || !y || n <= 0) return 0.0;
-    if (volts <= x[0]) return pow(10.0, y[0]);
-    if (volts >= x[n - 1]) return pow(10.0, y[n - 1]);
+    if (n == 1) return fmax(fmin(pow(10.0, y[0]), COREDAQ_MAX_INGAAS_LOG_POWER_W), COREDAQ_MIN_INGAAS_LOG_POWER_W);
+
+    if (volts <= x[0]) {
+        x0 = x[0]; x1 = x[1]; y0 = y[0]; y1 = y[1];
+        if (x1 == x0) return fmax(fmin(pow(10.0, y0), COREDAQ_MAX_INGAAS_LOG_POWER_W), COREDAQ_MIN_INGAAS_LOG_POWER_W);
+        t = (volts - x0) / (x1 - x0);
+        v = y0 + t * (y1 - y0);
+        return fmax(fmin(pow(10.0, v), COREDAQ_MAX_INGAAS_LOG_POWER_W), COREDAQ_MIN_INGAAS_LOG_POWER_W);
+    }
+    if (volts >= x[n - 1]) {
+        x0 = x[n - 2]; x1 = x[n - 1]; y0 = y[n - 2]; y1 = y[n - 1];
+        if (x1 == x0) return fmax(fmin(pow(10.0, y1), COREDAQ_MAX_INGAAS_LOG_POWER_W), COREDAQ_MIN_INGAAS_LOG_POWER_W);
+        t = (volts - x0) / (x1 - x0);
+        v = y0 + t * (y1 - y0);
+        return fmax(fmin(pow(10.0, v), COREDAQ_MAX_INGAAS_LOG_POWER_W), COREDAQ_MIN_INGAAS_LOG_POWER_W);
+    }
 
     lo = 0;
     hi = n - 1;
@@ -1023,12 +1039,10 @@ static double interp_log_power(const coredaq_device_t *dev, int ch, double volts
         if (x[mid] <= volts) lo = mid;
         else hi = mid;
     }
-    if (x[hi] == x[lo]) return pow(10.0, y[lo]);
-    {
-        double t = (volts - x[lo]) / (x[hi] - x[lo]);
-        double v = y[lo] * (1.0 - t) + y[hi] * t;
-        return pow(10.0, v);
-    }
+    if (x[hi] == x[lo]) return fmax(fmin(pow(10.0, y[lo]), COREDAQ_MAX_INGAAS_LOG_POWER_W), COREDAQ_MIN_INGAAS_LOG_POWER_W);
+    t = (volts - x[lo]) / (x[hi] - x[lo]);
+    v = y[lo] * (1.0 - t) + y[hi] * t;
+    return fmax(fmin(pow(10.0, v), COREDAQ_MAX_INGAAS_LOG_POWER_W), COREDAQ_MIN_INGAAS_LOG_POWER_W);
 }
 coredaq_result_t coredaq_snapshot_adc(coredaq_device_t *dev, int n_frames, int timeout_ms, int poll_hz, int out_codes[4], int out_gains[4]) {
     char cmd[64];
@@ -1098,7 +1112,7 @@ coredaq_result_t coredaq_snapshot_volts(coredaq_device_t *dev, int n_frames, int
     return COREDAQ_OK;
 }
 
-coredaq_result_t coredaq_snapshot_w(coredaq_device_t *dev, int n_frames, int timeout_ms, int poll_hz, float log_deadband_mv, float out_w[4], int out_gains[4]) {
+coredaq_result_t coredaq_snapshot_w(coredaq_device_t *dev, int n_frames, int timeout_ms, int poll_hz, float out_w[4], int out_gains[4]) {
     float mv[4];
     int i;
     coredaq_result_t rc;
@@ -1113,9 +1127,7 @@ coredaq_result_t coredaq_snapshot_w(coredaq_device_t *dev, int n_frames, int tim
 
     for (i = 0; i < 4; i += 1) {
         if (strcmp(dev->frontend, "LOG") == 0) {
-            float db = (log_deadband_mv > 0.0f) ? log_deadband_mv : dev->log_deadband_mv;
-            if (fabsf(mv[i]) < db) out_w[i] = 0.0f;
-            else out_w[i] = (float)interp_log_power(dev, i, (double)mv[i] / 1000.0);
+            out_w[i] = (float)interp_log_power(dev, i, (double)mv[i] / 1000.0);
         } else {
             int g = out_gains[i];
             float slope;
@@ -1255,22 +1267,18 @@ coredaq_result_t coredaq_transfer_frames_adc(coredaq_device_t *dev, int frames, 
     return COREDAQ_OK;
 }
 
-static void codes_to_mv(coredaq_device_t *dev, const int16_t *codes, int n, int ch_idx, float *out, float log_deadband_mv) {
+static void codes_to_mv(coredaq_device_t *dev, const int16_t *codes, int n, int ch_idx, float *out) {
     int i;
     for (i = 0; i < n; i += 1) {
         int corr = (int)codes[i];
         float mv;
         if (strcmp(dev->frontend, "LINEAR") == 0) corr -= dev->linear_zero_adc[ch_idx];
         mv = (float)corr * (float)COREDAQ_ADC_LSB_MV;
-        if (strcmp(dev->frontend, "LOG") == 0) {
-            float db = (log_deadband_mv > 0.0f) ? log_deadband_mv : dev->log_deadband_mv;
-            if (fabsf(mv) < db) mv = 0.0f;
-        }
         out[i] = mv;
     }
 }
 
-coredaq_result_t coredaq_transfer_frames_mv(coredaq_device_t *dev, int frames, float *ch1, float *ch2, float *ch3, float *ch4, size_t per_channel_len, float log_deadband_mv) {
+coredaq_result_t coredaq_transfer_frames_mv(coredaq_device_t *dev, int frames, float *ch1, float *ch2, float *ch3, float *ch4, size_t per_channel_len) {
     int16_t *c1, *c2, *c3, *c4;
     coredaq_result_t rc;
     if (!dev || frames <= 0 || per_channel_len < (size_t)frames || !ch1 || !ch2 || !ch3 || !ch4) return COREDAQ_ERR_INVALID_ARG;
@@ -1283,17 +1291,17 @@ coredaq_result_t coredaq_transfer_frames_mv(coredaq_device_t *dev, int frames, f
     rc = coredaq_transfer_frames_adc(dev, frames, c1, c2, c3, c4, (size_t)frames);
     if (rc != COREDAQ_OK) { free(c1); free(c2); free(c3); free(c4); return rc; }
 
-    codes_to_mv(dev, c1, frames, 0, ch1, log_deadband_mv);
-    codes_to_mv(dev, c2, frames, 1, ch2, log_deadband_mv);
-    codes_to_mv(dev, c3, frames, 2, ch3, log_deadband_mv);
-    codes_to_mv(dev, c4, frames, 3, ch4, log_deadband_mv);
+    codes_to_mv(dev, c1, frames, 0, ch1);
+    codes_to_mv(dev, c2, frames, 1, ch2);
+    codes_to_mv(dev, c3, frames, 2, ch3);
+    codes_to_mv(dev, c4, frames, 3, ch4);
 
     free(c1); free(c2); free(c3); free(c4);
     return COREDAQ_OK;
 }
-coredaq_result_t coredaq_transfer_frames_volts(coredaq_device_t *dev, int frames, float *ch1, float *ch2, float *ch3, float *ch4, size_t per_channel_len, float log_deadband_mv) {
+coredaq_result_t coredaq_transfer_frames_volts(coredaq_device_t *dev, int frames, float *ch1, float *ch2, float *ch3, float *ch4, size_t per_channel_len) {
     int i;
-    coredaq_result_t rc = coredaq_transfer_frames_mv(dev, frames, ch1, ch2, ch3, ch4, per_channel_len, log_deadband_mv);
+    coredaq_result_t rc = coredaq_transfer_frames_mv(dev, frames, ch1, ch2, ch3, ch4, per_channel_len);
     if (rc != COREDAQ_OK) return rc;
     for (i = 0; i < frames; i += 1) {
         ch1[i] /= 1000.0f;
@@ -1304,13 +1312,13 @@ coredaq_result_t coredaq_transfer_frames_volts(coredaq_device_t *dev, int frames
     return COREDAQ_OK;
 }
 
-coredaq_result_t coredaq_transfer_frames_w(coredaq_device_t *dev, int frames, float *ch1, float *ch2, float *ch3, float *ch4, size_t per_channel_len, float log_deadband_mv) {
+coredaq_result_t coredaq_transfer_frames_w(coredaq_device_t *dev, int frames, float *ch1, float *ch2, float *ch3, float *ch4, size_t per_channel_len) {
     int i;
     int gains[4] = {0, 0, 0, 0};
     coredaq_result_t rc;
     if (!dev || !ch1 || !ch2 || !ch3 || !ch4 || frames <= 0 || per_channel_len < (size_t)frames) return COREDAQ_ERR_INVALID_ARG;
 
-    rc = coredaq_transfer_frames_mv(dev, frames, ch1, ch2, ch3, ch4, per_channel_len, log_deadband_mv);
+    rc = coredaq_transfer_frames_mv(dev, frames, ch1, ch2, ch3, ch4, per_channel_len);
     if (rc != COREDAQ_OK) return rc;
 
     if (strcmp(dev->frontend, "LINEAR") == 0) {

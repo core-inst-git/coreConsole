@@ -112,7 +112,6 @@ coredaq_result_t coredaq_snapshot_w(
     int n_frames,
     int timeout_ms,
     int poll_hz,
-    float log_deadband_mv,
     float out_w[COREDAQ_NUM_HEADS],
     int out_gains[COREDAQ_NUM_HEADS]
 );
@@ -150,8 +149,7 @@ coredaq_result_t coredaq_transfer_frames_mv(
     float *ch2,
     float *ch3,
     float *ch4,
-    size_t per_channel_len,
-    float log_deadband_mv
+    size_t per_channel_len
 );
 
 coredaq_result_t coredaq_transfer_frames_volts(
@@ -161,8 +159,7 @@ coredaq_result_t coredaq_transfer_frames_volts(
     float *ch2,
     float *ch3,
     float *ch4,
-    size_t per_channel_len,
-    float log_deadband_mv
+    size_t per_channel_len
 );
 
 coredaq_result_t coredaq_transfer_frames_w(
@@ -172,8 +169,7 @@ coredaq_result_t coredaq_transfer_frames_w(
     float *ch2,
     float *ch3,
     float *ch4,
-    size_t per_channel_len,
-    float log_deadband_mv
+    size_t per_channel_len
 );
 
 coredaq_result_t coredaq_stream_write_address(coredaq_device_t *dev, int *out_addr);

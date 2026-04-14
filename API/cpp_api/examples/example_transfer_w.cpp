@@ -16,7 +16,7 @@ int main(int argc, char **argv) {
         std::cout << "Armed for trigger. Waiting...\n";
         dev.wait_for_completion(20000, 50);
 
-        coredaq::FrameBlock fb = dev.transfer_frames_w(frames, 300.0f);
+        coredaq::FrameBlock fb = dev.transfer_frames_w(frames);
         std::cout << "Transferred " << frames << " frames (W). First 8 samples:\n";
         for (int i = 0; i < std::min(frames, 8); ++i) {
             std::cout << i << ": "

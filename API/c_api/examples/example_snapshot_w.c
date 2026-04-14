@@ -31,7 +31,7 @@ int main(int argc, char **argv) {
     printf("IDN: %s\n", idn);
     printf("Frontend: %s\n", frontend);
 
-    rc = coredaq_snapshot_w(dev, 1, 1200, 200, 300.0f, power_w, gains);
+    rc = coredaq_snapshot_w(dev, 1, 1200, 200, power_w, gains);
     if (rc != COREDAQ_OK) {
         fprintf(stderr, "snapshot_w failed: %s (%s)\n", coredaq_result_string(rc), coredaq_last_error(dev));
         coredaq_destroy(dev);

@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
         std::cout << "IDN: " << dev.idn() << "\n";
         std::cout << "Frontend: " << dev.frontend_type() << "\n";
 
-        coredaq::Snapshot s = dev.snapshot_w(1, 1200, 200, 300.0f);
+        coredaq::Snapshot s = dev.snapshot_w(1, 1200, 200);
         for (int i = 0; i < 4; ++i) {
             std::cout << "CH" << (i + 1) << ": " << s.values[i] << " W (gain=" << s.gains[i] << ")\n";
         }

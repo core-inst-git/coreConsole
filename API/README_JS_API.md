@@ -35,7 +35,7 @@ const { CoreDAQ } = require('./coredaq_js_api');
   - frontend detection (`HEAD_TYPE?`)
   - detector/wavelength/responsivity model
   - linear calibration + factory/soft zeroing
-  - log LUT calibration + deadband
+  - log LUT calibration with endpoint extrapolation and 1 nW..3 mW InGaAs bounds
   - gain control, acquisition control, channel masks
   - bulk transfer (`XFER`) with timeout guards
   - frequency/oversampling compatibility logic

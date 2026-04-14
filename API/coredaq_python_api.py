@@ -59,6 +59,8 @@ class CoreDAQ:
     DEFAULT_RESPONSIVITY_REF_NM = 1550.0
     DEFAULT_SILICON_LOG_VY_V_PER_DECADE = 0.5
     DEFAULT_SILICON_LOG_IZ_A = 100e-12
+    MAX_INGAAS_LOG_POWER_W = 3e-3
+    MIN_INGAAS_LOG_POWER_W = 1e-9
     INGAAS_WAVELENGTH_RANGE_NM = (910.0, 1700.0)
     SILICON_WAVELENGTH_RANGE_NM = (400.0, 1100.0)
 
@@ -196,8 +198,6 @@ class CoreDAQ:
         self._loglut_V_mV_by_head: List[Optional[List[int]]] = [None for _ in range(self.NUM_HEADS)]
         self._loglut_log10P_Q16_by_head: List[Optional[List[int]]] = [None for _ in range(self.NUM_HEADS)]
 
-        # ====== v3.1: LOG deadband (mV), independent of zeroing ======
-        self._log_deadband_mV: float = 300.0  # default; change via set_log_deadband_mV()
 
         # Wavelength / responsivity model state.
         self._wavelength_nm: float = self.DEFAULT_WAVELENGTH_NM
@@ -558,6 +558,9 @@ class CoreDAQ:
     def get_silicon_log_model(self) -> Tuple[float, float]:
         return float(self._silicon_log_vy_v_per_decade), float(self._silicon_log_iz_a)
 
+    def _clamp_ingaas_log_power_w(self, power_w: float) -> float:
+        return float(min(max(float(power_w), self.MIN_INGAAS_LOG_POWER_W), self.MAX_INGAAS_LOG_POWER_W))
+
     def _convert_log_voltage_to_power_w(self, v_volts: float, head_idx: int = 0) -> float:
         if self._detector_type == self.DETECTOR_SILICON:
             # ADL5303 model:
@@ -572,6 +575,7 @@ class CoreDAQ:
         pin_w = float(self.voltage_to_power_W(float(v_volts), head=int(head_idx) + 1))
         if self._detector_type == self.DETECTOR_INGAAS:
             pin_w *= self._ingaas_responsivity_correction_factor()
+            pin_w = self._clamp_ingaas_log_power_w(pin_w)
         return pin_w
 
     def _convert_linear_mv_to_power_w(self, head_idx: int, gain: int, mv_corr: float) -> float:
@@ -825,20 +829,6 @@ class CoreDAQ:
         codes, gains = self.snapshot_adc(n_frames=n_frames, timeout_s=timeout_s, poll_hz=poll_hz)
         return self._apply_linear_zero_ch(codes), gains
 
-    # ---------- v3.1: LOG deadband controls ----------
-    def set_log_deadband_mV(self, deadband_mV: float) -> None:
-        """
-        Set LOG deadband threshold in mV.
-        Only used for LOG conversions; has no effect on LINEAR.
-        Set to 0 to disable.
-        """
-        if deadband_mV < 0:
-            raise ValueError("deadband_mV must be >= 0")
-        self._log_deadband_mV = float(deadband_mV)
-
-    def get_log_deadband_mV(self) -> float:
-        return float(self._log_deadband_mV)
-
     # ---------- Calibration loading ----------
     def _load_calibration_for_frontend(self):
         # Silicon heads use analytical conversion and do not expose CAL/LOGCAL.
@@ -992,26 +982,44 @@ class CoreDAQ:
         self._loglut_V_V = self._loglut_V_V_by_head[0]
         self._loglut_log10P = self._loglut_log10P_by_head[0]
 
+    def _interp_extrap_log10(self, xs: List[float], ys: List[float], x: float) -> float:
+        if not xs or not ys or len(xs) != len(ys):
+            raise CoreDAQError("Invalid LOG LUT")
+        if len(xs) == 1:
+            return float(ys[0])
+
+        if x <= xs[0]:
+            x0, x1 = xs[0], xs[1]
+            y0, y1 = ys[0], ys[1]
+            if x1 == x0:
+                return float(y0)
+            return float(y0 + ((x - x0) / (x1 - x0)) * (y1 - y0))
+
+        if x >= xs[-1]:
+            x0, x1 = xs[-2], xs[-1]
+            y0, y1 = ys[-2], ys[-1]
+            if x1 == x0:
+                return float(y1)
+            return float(y0 + ((x - x0) / (x1 - x0)) * (y1 - y0))
+
+        j = bisect.bisect_left(xs, x)
+        x0, x1 = xs[j - 1], xs[j]
+        y0, y1 = ys[j - 1], ys[j]
+        if x1 == x0:
+            return float(y0)
+        t = (x - x0) / (x1 - x0)
+        return float(y0 + t * (y1 - y0))
+
     # ---------- LOG conversion (volts -> power) ----------
     def voltage_to_power_W(self, v_volts: NumOrSeq, head: int = 1):
         self._require_frontend(self.FRONTEND_LOG, "voltage_to_power_W")
         xs, ys = self._get_log_lut_for_head_index(int(head) - 1)
 
         def interp_one(x: float) -> float:
-            if x <= xs[0]:
-                return 10.0 ** ys[0]
-            if x >= xs[-1]:
-                return 10.0 ** ys[-1]
-
-            j = bisect.bisect_left(xs, x)
-            x0, x1 = xs[j - 1], xs[j]
-            y0, y1 = ys[j - 1], ys[j]
-            if x1 == x0:
-                y = y0
-            else:
-                t = (x - x0) / (x1 - x0)
-                y = y0 + t * (y1 - y0)
-            return 10.0 ** y
+            p = 10.0 ** self._interp_extrap_log10(xs, ys, x)
+            if self._detector_type == self.DETECTOR_INGAAS:
+                p = self._clamp_ingaas_log_power_w(p)
+            return p
 
         if isinstance(v_volts, (list, tuple)):
             return [interp_one(float(v)) for v in v_volts]
@@ -1088,7 +1096,7 @@ class CoreDAQ:
         mv = [round(float(c) * self.ADC_LSB_MV, self.MV_OUTPUT_DECIMALS) for c in codes]
         return mv, gains
 
-    # ---------- Snapshot_W (unified, includes LINEAR autogain + LOG deadband) ----------
+    # ---------- Snapshot_W (unified, includes LINEAR autogain + LOG conversion) ----------
     def snapshot_W(
         self,
         n_frames: int = 1,
@@ -1102,8 +1110,6 @@ class CoreDAQ:
                 max_iters: int = 10,
         settle_s: float = 0.01,
         return_debug: bool = False,
-        # LOG only (optional override)
-        log_deadband_mV: Optional[float] = None,
     ):
         """
         Returns calibrated optical power (W) for each channel [1..4].
@@ -1117,7 +1123,6 @@ class CoreDAQ:
         LOG:
           - INGAAS: Uses LUT (voltage -> P).
           - SILICON: Uses ADL5303 model + Si responsivity curve.
-          - Applies deadband in mV (configurable) to suppress intercept wander.
           - Zeroing never affects LOG.
 
         Wavelength correction:
@@ -1129,13 +1134,9 @@ class CoreDAQ:
         if self._frontend_type == self.FRONTEND_LOG:
             mv, _gains = self.snapshot_mV(n_frames=n_frames, timeout_s=timeout_s, poll_hz=poll_hz, use_zero=None)
             out: List[float] = []
-            db = self._log_deadband_mV if log_deadband_mV is None else float(log_deadband_mV)
 
             for ch in range(4):
                 mv_corr = float(mv[ch])
-                if db > 0.0 and abs(mv_corr) < db:
-                    out.append(0.0)
-                    continue
                 v = mv_corr / 1000.0
                 p_w = self._convert_log_voltage_to_power_w(v, head_idx=ch)
                 out.append(round(p_w, self.POWER_OUTPUT_DECIMALS_MAX))
@@ -1424,12 +1425,11 @@ class CoreDAQ:
     def transfer_frames_raw(self, frames: int) -> List[List[int]]:
         return self.transfer_frames_adc(frames)
 
-    # ---------- v3.1: transfer_frames_mV with LOG deadband + LINEAR zero ----------
+    # ---------- transfer_frames_mV with LOG/LINEAR frontend handling ----------
     def transfer_frames_mV(
         self,
         frames: int,
         use_zero: Optional[bool] = None,          # kept for compatibility; ignored
-        log_deadband_mV: Optional[float] = None
     ) -> List[List[float]]:
         ch = self.transfer_frames_adc(frames)
         lsb_mV = self.ADC_LSB_MV
@@ -1446,13 +1446,10 @@ class CoreDAQ:
                 return out
 
             if self._frontend_type == self.FRONTEND_LOG:
-                db = self._log_deadband_mV if log_deadband_mV is None else float(log_deadband_mV)
                 out = []
                 for lst in ch:
                     codes = np.asarray(lst, dtype=np.float64)
                     mv = np.round(codes * lsb_mV, self.MV_OUTPUT_DECIMALS)
-                    if db > 0.0:
-                        mv[np.abs(mv) < db] = 0.0
                     out.append(mv.tolist())
                 return out
 
@@ -1468,12 +1465,9 @@ class CoreDAQ:
             return out
 
         if self._frontend_type == self.FRONTEND_LOG:
-            db = self._log_deadband_mV if log_deadband_mV is None else float(log_deadband_mV)
             out = []
             for lst in ch:
                 mv_list = [round(float(x) * lsb_mV, self.MV_OUTPUT_DECIMALS) for x in lst]
-                if db > 0.0:
-                    mv_list = [0.0 if abs(v) < db else v for v in mv_list]
                 out.append(mv_list)
             return out
 
@@ -1490,7 +1484,6 @@ class CoreDAQ:
         self,
         frames: int,
         use_zero: Optional[bool] = None,          # kept for compatibility; ignored
-        log_deadband_mV: Optional[float] = None
     ) -> List[List[float]]:
         """
         Transfers frames and converts to optical power in watts per channel.
@@ -1503,7 +1496,6 @@ class CoreDAQ:
         LOG:
           - INGAAS: ADC -> volts -> LUT -> watts (+ wavelength correction)
           - SILICON: ADL5303 model with Si responsivity curve
-          - optional deadband in mV (log_deadband_mV or configured default)
         """
         if frames <= 0:
             raise ValueError("frames must be > 0")
@@ -1524,18 +1516,13 @@ class CoreDAQ:
 
         if self._frontend_type == self.FRONTEND_LOG:
             v_ch = self.transfer_frames_volts(frames, use_zero=None)
-            db = self._log_deadband_mV if log_deadband_mV is None else float(log_deadband_mV)
 
             power_ch: List[List[float]] = [[], [], [], []]
             for ch_idx in range(4):
                 out_list = power_ch[ch_idx]
                 for v in v_ch[ch_idx]:
-                    mv_equiv = v * 1e3
-                    if db > 0.0 and abs(mv_equiv) < db:
-                        out_list.append(0.0)
-                    else:
-                        p_w = self._convert_log_voltage_to_power_w(float(v), head_idx=ch_idx)
-                        out_list.append(round(p_w, self.POWER_OUTPUT_DECIMALS_MAX))
+                    p_w = self._convert_log_voltage_to_power_w(float(v), head_idx=ch_idx)
+                    out_list.append(round(p_w, self.POWER_OUTPUT_DECIMALS_MAX))
             return power_ch
 
         raise CoreDAQError(f"Unknown frontend type: {self._frontend_type}")

@@ -232,12 +232,8 @@ LINEAR path:
 LOG path:
 
 - Zeroing is not used for LOG conversion.
-- LOG near-zero suppression is handled via deadband:
-
-```python
-dev.set_log_deadband_mV(300.0)
-db = dev.get_log_deadband_mV()
-```
+- LOG conversion uses the measured voltage directly; no near-zero suppression is applied.
+- InGaAs `LOG` extrapolates past the LUT endpoints using the end-segment slope, then clamps output to `1 nW .. 3 mW`.
 
 ## 12. Robust Workflow Recommendations
 
@@ -279,7 +275,6 @@ snapshot_W(n_frames: int = 8, timeout_s: float = 2.0, poll_hz: float = 100.0, au
 set_gain(head: int, value: int) -> None
 get_gains() -> List[int]
 recompute_zero_from_snapshot(temp_snap_frames: int = 32, temp_freq_hz: int = 1000, temp_os: int = 6, settle_s: float = 0.2)
-set_log_deadband_mV(deadband_mV: float) -> None
 
 # Acquisition control
 arm_acquisition(frames: int, use_trigger: bool = False, trigger_rising: bool = True) -> None

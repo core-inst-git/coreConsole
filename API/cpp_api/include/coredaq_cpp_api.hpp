@@ -60,16 +60,16 @@ public:
     Snapshot snapshot_adc(int n_frames = 1, int timeout_ms = 1000, int poll_hz = 200);
     Snapshot snapshot_mv(int n_frames = 1, int timeout_ms = 1000, int poll_hz = 200);
     Snapshot snapshot_volts(int n_frames = 1, int timeout_ms = 1000, int poll_hz = 200);
-    Snapshot snapshot_w(int n_frames = 1, int timeout_ms = 1000, int poll_hz = 200, float log_deadband_mv = 300.0f);
+    Snapshot snapshot_w(int n_frames = 1, int timeout_ms = 1000, int poll_hz = 200);
 
     void arm_acquisition(int frames, bool use_trigger = false, bool trigger_rising = true);
     void start_acquisition();
     void stop_acquisition();
     void wait_for_completion(int timeout_ms = 60000, int poll_ms = 50);
 
-    FrameBlock transfer_frames_mv(int frames, float log_deadband_mv = 300.0f);
-    FrameBlock transfer_frames_volts(int frames, float log_deadband_mv = 300.0f);
-    FrameBlock transfer_frames_w(int frames, float log_deadband_mv = 300.0f);
+    FrameBlock transfer_frames_mv(int frames);
+    FrameBlock transfer_frames_volts(int frames);
+    FrameBlock transfer_frames_w(int frames);
 
     static std::vector<std::string> find_ports(int timeout_ms = 120);
 

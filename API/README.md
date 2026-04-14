@@ -140,9 +140,8 @@ Main methods:
 
 - `snapshot_W(...)` returns 4 values (one per channel) when `n_frames=1`.
 - For `LINEAR`, `autogain=True` can adjust gain before final conversion.
-- For `LOG`, deadband can suppress near-zero output:
-  - `set_log_deadband_mV(...)`
-  - `get_log_deadband_mV()`
+- For `LOG`, the measured voltage is converted directly through the active LOG model or LUT without near-zero suppression.
+- InGaAs `LOG` uses endpoint-slope extrapolation beyond the LUT and clamps the reported power into the `1 nW .. 3 mW` window.
 
 ---
 
