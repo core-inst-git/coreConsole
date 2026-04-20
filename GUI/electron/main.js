@@ -352,6 +352,9 @@ function startBackend() {
     const laserJsPath = isDev
       ? path.resolve(__dirname, '..', '..', 'packages', 'laser-js')
       : path.join(process.resourcesPath, 'laser-js');
+    const bundledPythonPath = isDev
+      ? path.resolve(__dirname, '..', 'build-resources', 'python-runtime', 'win64', 'python.exe')
+      : path.join(process.resourcesPath, 'python-runtime', 'python.exe');
     const guiNodeModulesPaths = isDev
       ? [path.resolve(__dirname, '..', 'node_modules')]
       : [
@@ -360,6 +363,7 @@ function startBackend() {
       ];
     if (fs.existsSync(apiPath)) env.COREDAQ_API_PATH = apiPath;
     if (fs.existsSync(laserJsPath)) env.COREDAQ_LASER_JS_PATH = laserJsPath;
+    if (fs.existsSync(bundledPythonPath)) env.COREDAQ_BUNDLED_PYTHON = bundledPythonPath;
     const resolvedGuiNodeModulesPaths = guiNodeModulesPaths
       .filter((p) => !isDev || fs.existsSync(p));
     if (resolvedGuiNodeModulesPaths.length > 0) {

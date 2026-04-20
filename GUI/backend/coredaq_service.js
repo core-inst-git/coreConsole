@@ -122,6 +122,15 @@ function execFileAsync(file, args = [], opts = {}) {
   });
 }
 
+function buildBundledPythonEnv(exePath) {
+  const root = path.dirname(String(exePath || ''));
+  return {
+    ...process.env,
+    PYTHONHOME: root,
+    PYTHONNOUSERSITE: '1',
+  };
+}
+
 function nowSec() {
   return Date.now() / 1000;
 }
@@ -3141,6 +3150,27 @@ class CoreDAQBackend {
   }
 
   _pythonRunnerCandidates() {
+    const explicitBundled = String(process.env.COREDAQ_BUNDLED_PYTHON || '').trim();
+    if (explicitBundled && fs.existsSync(explicitBundled)) {
+      return [
+        {
+          exe: explicitBundled,
+          prefix: [],
+          env: buildBundledPythonEnv(explicitBundled),
+          bundled: true,
+        },
+        ...(process.platform === 'win32'
+          ? [
+            { exe: 'py', prefix: ['-3'] },
+            { exe: 'python', prefix: [] },
+            { exe: 'python3', prefix: [] },
+          ]
+          : [
+            { exe: 'python3', prefix: [] },
+            { exe: 'python', prefix: [] },
+          ]),
+      ];
+    }
     if (process.platform === 'win32') {
       return [
         { exe: 'py', prefix: ['-3'] },
@@ -3166,6 +3196,7 @@ class CoreDAQBackend {
           windowsHide: true,
           timeout: 45000,
           maxBuffer: 16 * 1024 * 1024,
+          env: runner.env || process.env,
         });
         return {
           runner: cmd,
@@ -3180,6 +3211,7 @@ class CoreDAQBackend {
           message: String(err?.message || err),
           stdout: String(err?.stdout || ''),
           stderr: String(err?.stderr || ''),
+          bundled: !!runner.bundled,
         });
       }
     }
@@ -3190,8 +3222,16 @@ class CoreDAQBackend {
     }).join(' | ');
 
     const missingH5py = attempts.some((a) => String(a.stderr || '').includes('MISSING_DEPENDENCY:h5py'));
+    const bundledAttempted = attempts.some((a) => !!a.bundled);
+    if (missingH5py && bundledAttempted) {
+      throw new Error(`H5 save failed: bundled HDF5 runtime is missing required files. Reinstall coreConsole. ${detail}`);
+    }
     if (missingH5py) {
       throw new Error(`H5 save failed: Python h5py dependency is missing. Install with "pip install h5py". ${detail}`);
+    }
+
+    if (bundledAttempted) {
+      throw new Error(`H5 save failed: bundled HDF5 runtime is unavailable or damaged. Reinstall coreConsole. ${detail}`);
     }
 
     throw new Error(`H5 save failed: no usable Python runtime found. Install Python 3 and h5py. ${detail}`);

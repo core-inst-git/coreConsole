@@ -247,7 +247,7 @@ def main() -> int:
     if not in_json.exists():
         raise FileNotFoundError(f"Input JSON not found: {in_json}")
 
-    with in_json.open("r", encoding="utf-8") as f:
+    with in_json.open("r", encoding="utf-8-sig") as f:
         payload = json.load(f)
 
     if not isinstance(payload, dict):

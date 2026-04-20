@@ -8,6 +8,7 @@ GUI/release/
 GUI/.electron-cache/
 GUI/dist/
 GUI/build/
+GUI/build-resources/
 GUI/backend/bin/
 GUI/backend/build/
 GUI/backend/dist/

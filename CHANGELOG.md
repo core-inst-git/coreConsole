@@ -1,5 +1,12 @@
 # Changelog
 
+## v1.0.4
+
+- Bundled a private Python + `h5py` HDF5 runtime into the Windows app so `Save H5` no longer depends on a system Python install.
+- Updated the backend to prefer the bundled HDF5 runtime and show user-facing reinstall guidance instead of raw Python-path errors.
+- Hardened `sweep_h5_writer.py` to accept UTF-8 BOM input payloads.
+- Updated Windows build packaging so portable and zip releases automatically include the HDF5 export runtime.
+
 ## v1.0.3
 
 - Removed LOG deadband handling from the JS, Python, C, and C++ APIs.
