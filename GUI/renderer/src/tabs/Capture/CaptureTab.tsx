@@ -96,12 +96,14 @@ const captureSessionCache: {
   gpibModel: string | null;
   sample_rate_hz: number | null;
   os_idx: number | null;
+  activeIdsByDevice: Record<string, string[]>;
 } = {
   resources: [],
   selectedResource: '',
   gpibModel: null,
   sample_rate_hz: null,
   os_idx: null,
+  activeIdsByDevice: {},
 };
 
 function tsNow(): string {
@@ -329,6 +331,43 @@ function buildSaveMask(channels: ChannelDef[]): number {
   return mask & 0x0f;
 }
 
+function parseFiniteNumber(text: string): number | null {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return null;
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
+}
+
+function parsePositiveInt(text: string): number | null {
+  const value = parseFiniteNumber(text);
+  if (value === null) return null;
+  return Math.round(value);
+}
+
+function reconcileActiveChannels(
+  preferredIds: string[] | undefined,
+  available: ChannelDef[],
+): ChannelDef[] {
+  const byId = new Map(available.map((item) => [item.id, item]));
+  const out: ChannelDef[] = [];
+  const seen = new Set<string>();
+
+  for (const id of preferredIds || []) {
+    const item = byId.get(id);
+    if (!item || seen.has(id)) continue;
+    out.push(item);
+    seen.add(id);
+  }
+
+  for (const item of available) {
+    if (seen.has(item.id)) continue;
+    out.push(item);
+    seen.add(item.id);
+  }
+
+  return out;
+}
+
 
 function pickPowerScale(dataW: number[]): PowerScale {
   let maxAbs = 0;
@@ -409,6 +448,14 @@ export default function CaptureTab({
   const [visibleAverageMs, setVisibleAverageMs] = useState(DEFAULT_VISIBLE_AVERAGE_MS);
   const [sampleRateHz, setSampleRateHz] = useState(() => captureSessionCache.sample_rate_hz ?? SAMPLE_RATE_DEFAULT);
   const [osIdx, setOsIdx] = useState(() => captureSessionCache.os_idx ?? 0);
+  const [startNmDraft, setStartNmDraft] = useState(String(DEFAULT_TSL_START_NM));
+  const [stopNmDraft, setStopNmDraft] = useState(String(DEFAULT_TSL_STOP_NM));
+  const [speedNmSDraft, setSpeedNmSDraft] = useState('50');
+  const [powerMwDraft, setPowerMwDraft] = useState('1');
+  const [visiblePointCountDraft, setVisiblePointCountDraft] = useState(String(DEFAULT_VISIBLE_POINT_COUNT));
+  const [visibleSettleMsDraft, setVisibleSettleMsDraft] = useState(String(DEFAULT_VISIBLE_SETTLE_MS));
+  const [visibleAverageMsDraft, setVisibleAverageMsDraft] = useState(String(DEFAULT_VISIBLE_AVERAGE_MS));
+  const [sampleRateHzDraft, setSampleRateHzDraft] = useState(String(captureSessionCache.sample_rate_hz ?? SAMPLE_RATE_DEFAULT));
 
   useEffect(() => {
     captureSessionCache.sample_rate_hz = sampleRateHz;
@@ -417,6 +464,38 @@ export default function CaptureTab({
   useEffect(() => {
     captureSessionCache.os_idx = osIdx;
   }, [osIdx]);
+
+  useEffect(() => {
+    setStartNmDraft(String(startNm));
+  }, [startNm]);
+
+  useEffect(() => {
+    setStopNmDraft(String(stopNm));
+  }, [stopNm]);
+
+  useEffect(() => {
+    setSpeedNmSDraft(String(speedNmS));
+  }, [speedNmS]);
+
+  useEffect(() => {
+    setPowerMwDraft(String(powerMw));
+  }, [powerMw]);
+
+  useEffect(() => {
+    setVisiblePointCountDraft(String(visiblePointCount));
+  }, [visiblePointCount]);
+
+  useEffect(() => {
+    setVisibleSettleMsDraft(String(visibleSettleMs));
+  }, [visibleSettleMs]);
+
+  useEffect(() => {
+    setVisibleAverageMsDraft(String(visibleAverageMs));
+  }, [visibleAverageMs]);
+
+  useEffect(() => {
+    setSampleRateHzDraft(String(sampleRateHz));
+  }, [sampleRateHz]);
 
   const [gains, setGains] = useState([0, 0, 0, 0]);
   const seededDeviceIdRef = useRef<string>('');
@@ -547,11 +626,20 @@ export default function CaptureTab({
   }, [gpibModel, resources, selectedResource, upsertResource]);
 
   useEffect(() => {
-    setActive((prev) => {
-      const physical = prev.filter((c) => c.type === 'physical');
-      return [...physical, ...selectedVirtualDefs];
-    });
-  }, [selectedVirtualDefs]);
+    if (!selectedDeviceId) {
+      setActive(PHYS_CHANNELS.map((c) => ({ ...c, type: 'physical' })));
+      return;
+    }
+    const physicalDefs: ChannelDef[] = PHYS_CHANNELS.map((c) => ({ ...c, type: 'physical' }));
+    const available = [...physicalDefs, ...selectedVirtualDefs];
+    const preferredIds = captureSessionCache.activeIdsByDevice[selectedDeviceId];
+    setActive(reconcileActiveChannels(preferredIds, available));
+  }, [selectedDeviceId, selectedVirtualDefs]);
+
+  useEffect(() => {
+    if (!selectedDeviceId) return;
+    captureSessionCache.activeIdsByDevice[selectedDeviceId] = active.map((item) => item.id);
+  }, [active, selectedDeviceId]);
 
   const addLog = useCallback((text: string) => {
     setLogs((prev) => [...prev.slice(-199), { ts: tsNow(), text }]);
@@ -582,6 +670,78 @@ export default function CaptureTab({
     addLog(message);
     window.alert(message);
   };
+
+  const commitStartNm = useCallback(() => {
+    const parsed = parseFiniteNumber(startNmDraft);
+    if (parsed === null) {
+      setStartNmDraft(String(startNm));
+      return;
+    }
+    setStartNm(parsed);
+  }, [startNm, startNmDraft]);
+
+  const commitStopNm = useCallback(() => {
+    const parsed = parseFiniteNumber(stopNmDraft);
+    if (parsed === null) {
+      setStopNmDraft(String(stopNm));
+      return;
+    }
+    setStopNm(parsed);
+  }, [stopNm, stopNmDraft]);
+
+  const commitSpeedNmS = useCallback(() => {
+    const parsed = parseFiniteNumber(speedNmSDraft);
+    if (parsed === null) {
+      setSpeedNmSDraft(String(speedNmS));
+      return;
+    }
+    setSpeedNmS(parsed);
+  }, [speedNmS, speedNmSDraft]);
+
+  const commitPowerMw = useCallback(() => {
+    const parsed = parseFiniteNumber(powerMwDraft);
+    if (parsed === null) {
+      setPowerMwDraft(String(powerMw));
+      return;
+    }
+    setPowerMw(parsed);
+  }, [powerMw, powerMwDraft]);
+
+  const commitVisiblePointCount = useCallback(() => {
+    const parsed = parsePositiveInt(visiblePointCountDraft);
+    if (parsed === null) {
+      setVisiblePointCountDraft(String(visiblePointCount));
+      return;
+    }
+    setVisiblePointCount(Math.max(1, parsed));
+  }, [visiblePointCount, visiblePointCountDraft]);
+
+  const commitVisibleSettleMs = useCallback(() => {
+    const parsed = parsePositiveInt(visibleSettleMsDraft);
+    if (parsed === null) {
+      setVisibleSettleMsDraft(String(visibleSettleMs));
+      return;
+    }
+    setVisibleSettleMs(Math.max(0, parsed));
+  }, [visibleSettleMs, visibleSettleMsDraft]);
+
+  const commitVisibleAverageMs = useCallback(() => {
+    const parsed = parsePositiveInt(visibleAverageMsDraft);
+    if (parsed === null) {
+      setVisibleAverageMsDraft(String(visibleAverageMs));
+      return;
+    }
+    setVisibleAverageMs(Math.max(1, parsed));
+  }, [visibleAverageMs, visibleAverageMsDraft]);
+
+  const commitSampleRateHz = useCallback(() => {
+    const parsed = parsePositiveInt(sampleRateHzDraft);
+    if (parsed === null) {
+      setSampleRateHzDraft(String(sampleRateHz));
+      return;
+    }
+    setSampleRateHz(clampSampleRate(parsed));
+  }, [sampleRateHz, sampleRateHzDraft]);
 
   const estimate = useMemo(() => {
     const span = Math.abs(stopNm - startNm);
@@ -1011,7 +1171,10 @@ export default function CaptureTab({
   const addPhysical = (id: string) => {
     const def = PHYS_CHANNELS.find((c) => c.id === id);
     if (!def) return;
-    setActive((prev) => [...prev, { ...def, type: 'physical' }]);
+    setActive((prev) => {
+      if (prev.some((item) => item.id === id)) return prev;
+      return [...prev, { ...def, type: 'physical' }];
+    });
   };
 
   const addMath = () => {
@@ -1122,8 +1285,15 @@ export default function CaptureTab({
                   min={selectedLaserProfile.minNm ?? undefined}
                   max={selectedLaserProfile.maxNm ?? undefined}
                   step="0.001"
-                  value={startNm}
-                  onChange={(e) => setStartNm(Number(e.target.value))}
+                  value={startNmDraft}
+                  onChange={(e) => setStartNmDraft(e.target.value)}
+                  onBlur={commitStartNm}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      commitStartNm();
+                      (e.currentTarget as HTMLInputElement).blur();
+                    }
+                  }}
                 />
               </div>
               <div className="capture-field">
@@ -1134,8 +1304,15 @@ export default function CaptureTab({
                   min={selectedLaserProfile.minNm ?? undefined}
                   max={selectedLaserProfile.maxNm ?? undefined}
                   step="0.001"
-                  value={stopNm}
-                  onChange={(e) => setStopNm(Number(e.target.value))}
+                  value={stopNmDraft}
+                  onChange={(e) => setStopNmDraft(e.target.value)}
+                  onBlur={commitStopNm}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      commitStopNm();
+                      (e.currentTarget as HTMLInputElement).blur();
+                    }
+                  }}
                 />
               </div>
             </div>
@@ -1150,8 +1327,15 @@ export default function CaptureTab({
                       type="number"
                       min="1"
                       step="1"
-                      value={visiblePointCount}
-                      onChange={(e) => setVisiblePointCount(Math.max(1, Math.round(Number(e.target.value) || 1)))}
+                      value={visiblePointCountDraft}
+                      onChange={(e) => setVisiblePointCountDraft(e.target.value)}
+                      onBlur={commitVisiblePointCount}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          commitVisiblePointCount();
+                          (e.currentTarget as HTMLInputElement).blur();
+                        }
+                      }}
                     />
                   </div>
                   <div className="capture-field">
@@ -1161,8 +1345,15 @@ export default function CaptureTab({
                       type="number"
                       min="0"
                       step="0.1"
-                      value={powerMw}
-                      onChange={(e) => setPowerMw(Number(e.target.value))}
+                      value={powerMwDraft}
+                      onChange={(e) => setPowerMwDraft(e.target.value)}
+                      onBlur={commitPowerMw}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          commitPowerMw();
+                          (e.currentTarget as HTMLInputElement).blur();
+                        }
+                      }}
                     />
                   </div>
                 </div>
@@ -1175,8 +1366,15 @@ export default function CaptureTab({
                       type="number"
                       min="0"
                       step="10"
-                      value={visibleSettleMs}
-                      onChange={(e) => setVisibleSettleMs(Math.max(0, Math.round(Number(e.target.value) || 0)))}
+                      value={visibleSettleMsDraft}
+                      onChange={(e) => setVisibleSettleMsDraft(e.target.value)}
+                      onBlur={commitVisibleSettleMs}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          commitVisibleSettleMs();
+                          (e.currentTarget as HTMLInputElement).blur();
+                        }
+                      }}
                     />
                   </div>
                   <div className="capture-field">
@@ -1186,8 +1384,15 @@ export default function CaptureTab({
                       type="number"
                       min="1"
                       step="10"
-                      value={visibleAverageMs}
-                      onChange={(e) => setVisibleAverageMs(Math.max(1, Math.round(Number(e.target.value) || 1)))}
+                      value={visibleAverageMsDraft}
+                      onChange={(e) => setVisibleAverageMsDraft(e.target.value)}
+                      onBlur={commitVisibleAverageMs}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          commitVisibleAverageMs();
+                          (e.currentTarget as HTMLInputElement).blur();
+                        }
+                      }}
                     />
                   </div>
                 </div>
@@ -1201,8 +1406,15 @@ export default function CaptureTab({
                     type="number"
                     min="0"
                     step="0.1"
-                    value={speedNmS}
-                    onChange={(e) => setSpeedNmS(Number(e.target.value))}
+                    value={speedNmSDraft}
+                    onChange={(e) => setSpeedNmSDraft(e.target.value)}
+                    onBlur={commitSpeedNmS}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        commitSpeedNmS();
+                        (e.currentTarget as HTMLInputElement).blur();
+                      }
+                    }}
                   />
                 </div>
                 <div className="capture-field">
@@ -1212,8 +1424,15 @@ export default function CaptureTab({
                     type="number"
                     min="0"
                     step="0.1"
-                    value={powerMw}
-                    onChange={(e) => setPowerMw(Number(e.target.value))}
+                    value={powerMwDraft}
+                    onChange={(e) => setPowerMwDraft(e.target.value)}
+                    onBlur={commitPowerMw}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        commitPowerMw();
+                        (e.currentTarget as HTMLInputElement).blur();
+                      }
+                    }}
                   />
                 </div>
               </div>
@@ -1233,8 +1452,15 @@ export default function CaptureTab({
                   min={SAMPLE_RATE_MIN}
                   max={SAMPLE_RATE_MAX}
                   step="1"
-                  value={sampleRateHz}
-                  onChange={(e) => setSampleRateHz(clampSampleRate(Number(e.target.value)))}
+                  value={sampleRateHzDraft}
+                  onChange={(e) => setSampleRateHzDraft(e.target.value)}
+                  onBlur={commitSampleRateHz}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      commitSampleRateHz();
+                      (e.currentTarget as HTMLInputElement).blur();
+                    }
+                  }}
                 />
                 <div className="capture-hint">Default 50,000 Hz - Max 100,000 Hz</div>
               </div>

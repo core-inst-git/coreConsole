@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.0.5
+
+- Fixed Capture tab numeric inputs so values can be freely edited again instead of getting stuck after the first change.
+- Changed Capture tab field handling to use draft text state while typing and only commit validated numeric values on blur or Enter.
+- Preserved Capture tab physical/virtual channel visibility and arrangement across tab switches for the active device instead of resetting to all four channels.
+
 ## v1.0.4
 
 - Bundled a private Python + `h5py` HDF5 runtime into the Windows app so `Save H5` no longer depends on a system Python install.
