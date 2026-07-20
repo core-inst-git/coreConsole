@@ -1,6 +1,6 @@
 {
   "name": "coreconsole",
-  "version": "0.1.0",
+  "version": "1.1.0",
   "private": true,
   "description": "coreConsole desktop app for coreDAQ",
   "engines": {
@@ -13,7 +13,7 @@
     "dev": "concurrently -k \"npm:dev:renderer\" \"npm:dev:electron\"",
     "dev:renderer": "vite --config renderer/vite.config.ts",
     "dev:electron": "wait-on tcp:5173 && electron .",
-    "backend": "node backend/coredaq_service.js",
+    "backend": "python3 backend/coredaq_service.py",
     "build": "npm run build:renderer",
     "build:renderer": "vite build --config renderer/vite.config.ts",
     "preview": "vite preview --config renderer/vite.config.ts",
@@ -29,9 +29,7 @@
   "dependencies": {
     "echarts": "^5.6.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "serialport": "^12.0.0",
-    "ws": "^8.18.0"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
@@ -48,45 +46,20 @@
     "appId": "com.coreinstrumentation.coreconsole",
     "productName": "coreConsole",
     "asar": true,
-    "asarUnpack": [
-      "**/*.node"
-    ],
     "directories": {
       "output": "release"
     },
     "files": [
       "electron/**/*",
-      "backend/coredaq_service.js",
       "renderer/dist/**/*",
       "package.json"
     ],
     "extraResources": [
       {
-        "from": "../API",
-        "to": "API",
+        "from": "backend/dist/coredaq-backend",
+        "to": "backend/coredaq-backend",
         "filter": [
           "**/*"
-        ]
-      },
-      {
-        "from": "../packages/laser-js",
-        "to": "laser-js",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "../packages/visa-service",
-        "to": "visa-service",
-        "filter": [
-          "**/*"
-        ]
-      },
-      {
-        "from": "../packages/visa-addon/build/Release",
-        "to": "visa-addon/build/Release",
-        "filter": [
-          "*.node"
         ]
       }
     ],

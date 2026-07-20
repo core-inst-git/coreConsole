@@ -21,6 +21,17 @@ export default function CalibrationTab({ connected, devices, activeDeviceId, onS
 
   const [targetDeviceId, setTargetDeviceId] = useState('');
   const [step, setStep] = useState<Step>('idle');
+
+  // Watchdog: a zero-recalibration that never acks (backend crash, device
+  // unplug mid-cal) must not wedge the tab in 'running' forever.
+  useEffect(() => {
+    if (step !== 'running') return;
+    const t = window.setTimeout(() => {
+      setStep('error');
+      setMessage('Timed out waiting for the device — check the connection and try again.');
+    }, 30_000);
+    return () => window.clearTimeout(t);
+  }, [step]);
   const [message, setMessage] = useState('');
 
   useEffect(() => {

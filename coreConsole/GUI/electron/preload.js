@@ -1,6 +1,11 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Effective backend WS port, passed by main via additionalArguments.
+const wsPortArg = process.argv.find((a) => a.startsWith('--coredaq-ws-port='));
+const wsPort = wsPortArg ? Number(wsPortArg.split('=')[1]) || 8765 : 8765;
+
 contextBridge.exposeInMainWorld('coredaq', {
+  wsPort,
   getStatus: () => ipcRenderer.invoke('coredaq:get-status'),
   onOpenPreferences: (cb) => ipcRenderer.on('ui:open-preferences', cb),
   onWindowState: (cb) => {
@@ -16,16 +21,5 @@ contextBridge.exposeInMainWorld('coredaq', {
   pickSavePath: (defaultName) => ipcRenderer.invoke('coredaq:pick-save-path', { defaultName })
 });
 
-contextBridge.exposeInMainWorld('gpib', {
-  health: () => ipcRenderer.invoke('gpib:health'),
-  listResources: () => ipcRenderer.invoke('gpib:list'),
-  open: (resource, timeoutMs) => ipcRenderer.invoke('gpib:open', { resource, timeoutMs }),
-  write: (sessionId, command) => ipcRenderer.invoke('gpib:write', { sessionId, command }),
-  read: (sessionId, maxBytes) => ipcRenderer.invoke('gpib:read', { sessionId, maxBytes }),
-  query: (sessionId, command, maxBytes) => ipcRenderer.invoke('gpib:query', { sessionId, command, maxBytes }),
-  queryResource: (resource, command, timeoutMs, maxBytes) =>
-    ipcRenderer.invoke('gpib:query', { resource, command, timeoutMs, maxBytes }),
-  setTimeout: (sessionId, ms) => ipcRenderer.invoke('gpib:set-timeout', { sessionId, ms }),
-  close: (sessionId) => ipcRenderer.invoke('gpib:close', { sessionId }),
-  restartService: () => ipcRenderer.invoke('gpib:restart-service'),
-});
+// GPIB/laser control flows through the Python backend's WebSocket protocol
+// (gpib_* / sweep_* actions) — there is no Electron-IPC GPIB bridge anymore.

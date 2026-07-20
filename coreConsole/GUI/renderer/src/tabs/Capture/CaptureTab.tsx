@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import CaptureMiniChart from '@/components/CaptureMiniChart';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import CaptureMiniChart, { ZoomWindow } from '@/components/CaptureMiniChart';
 import { DeviceStatus, gainDisplayLabel, sendControl, subscribeControl, subscribeStatus } from '@/coredaqClient';
 import { VirtualChannelDef, VirtualMathType, parsePhysicalSourceId, physicalSourceId } from '@/virtualChannels';
 
@@ -55,8 +55,72 @@ const SAMPLE_RATE_MIN = 1;
 const SAMPLE_RATE_MAX = 100_000;
 const OS_IDX_MIN = 0;
 const OS_IDX_MAX = 6;
-const SWEEP_PREVIEW_POINTS_DEFAULT = 120_000;
+// Preview sent by the backend: a shared-grid min/max ENVELOPE (peak-safe),
+// deliberately small — zooming fetches a re-decimated window from the
+// backend's full-resolution store via the sweep_window action.
+const SWEEP_PREVIEW_POINTS_DEFAULT = 4000;
+const SWEEP_CHART_GROUP = 'sweep-cards';
 const DEFAULT_SWEEP_MASK = 0x0f;
+
+const SWEEP_SETTINGS_STORAGE_KEY = 'coredaq.sweep_settings.v1';
+
+type SweepSettings = {
+  startNm?: number;
+  stopNm?: number;
+  speedNmS?: number;
+  powerMw?: number;
+  sampleRateHz?: number;
+  osIdx?: number;
+  defaultWlNm?: number;
+};
+
+function loadSweepSettings(): SweepSettings {
+  try {
+    const raw = window.localStorage.getItem(SWEEP_SETTINGS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: SweepSettings = {};
+    for (const k of ['startNm', 'stopNm', 'speedNmS', 'powerMw', 'sampleRateHz', 'osIdx', 'defaultWlNm'] as const) {
+      const v = (parsed as Record<string, unknown>)[k];
+      if (typeof v === 'number' && Number.isFinite(v)) out[k] = v;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function saveSweepSettings(s: SweepSettings) {
+  try {
+    window.localStorage.setItem(SWEEP_SETTINGS_STORAGE_KEY, JSON.stringify(s));
+  } catch {
+    // storage unavailable — settings just won't persist across restarts
+  }
+}
+
+type SweepBase = { x: number[]; y: number[][] };
+
+/** Splice a high-resolution window into the base preview so the x-extent (and
+ * therefore the dataZoom state) stays that of the full sweep. */
+function mergeSweepWindow(
+  base: SweepBase,
+  winX: number[],
+  winY: number[][],
+  x0: number,
+  x1: number
+): SweepBase {
+  let prefixEnd = 0;
+  while (prefixEnd < base.x.length && base.x[prefixEnd] < x0) prefixEnd += 1;
+  let suffixStart = base.x.length;
+  while (suffixStart > 0 && base.x[suffixStart - 1] > x1) suffixStart -= 1;
+  const x = [...base.x.slice(0, prefixEnd), ...winX, ...base.x.slice(suffixStart)];
+  const y: number[][] = [[], [], [], []];
+  for (let c = 0; c < 4; c += 1) {
+    y[c] = [...base.y[c].slice(0, prefixEnd), ...(winY[c] || []), ...base.y[c].slice(suffixStart)];
+  }
+  return { x, y };
+}
 
 function tsNow(): string {
   return new Date().toLocaleTimeString();
@@ -85,7 +149,7 @@ function maxOsForFreq(freqHz: number): number {
 function userFacingSweepError(raw: string): string {
   const t = (raw || '').toLowerCase();
   if (t.includes('no gpib resource selected') || t.includes('no gpib resource provided')) {
-    return 'No laser resource selected. Click Scan VISA, select a resource, then run sweep.';
+    return 'No laser resource selected. Click Scan Lasers (or Add Laser), select a resource, then run sweep.';
   }
   if (t.includes('not found or not responding on visa resource')) {
     return raw;
@@ -175,16 +239,63 @@ export default function CaptureTab({
   const [gpibCmd, setGpibCmd] = useState('*IDN?');
   const [logs, setLogs] = useState<LogLine[]>([]);
 
-  const [startNm, setStartNm] = useState(1480);
-  const [stopNm, setStopNm] = useState(1620);
-  const [speedNmS, setSpeedNmS] = useState(50);
-  const [powerMw, setPowerMw] = useState(1);
-  const [sampleRateHz, setSampleRateHz] = useState(SAMPLE_RATE_DEFAULT);
-  const [osIdx, setOsIdx] = useState(0);
+  const [startNm, setStartNm] = useState(() => loadSweepSettings().startNm ?? 1480);
+  const [stopNm, setStopNm] = useState(() => loadSweepSettings().stopNm ?? 1620);
+  const [speedNmS, setSpeedNmS] = useState(() => loadSweepSettings().speedNmS ?? 50);
+  const [powerMw, setPowerMw] = useState(() => loadSweepSettings().powerMw ?? 1);
+  const [sampleRateHz, setSampleRateHz] = useState(
+    () => loadSweepSettings().sampleRateHz ?? SAMPLE_RATE_DEFAULT
+  );
+  const [osIdx, setOsIdx] = useState(() => loadSweepSettings().osIdx ?? 0);
+  // Wavelength the laser is parked at after a sweep finishes (mdeg precision).
+  const [defaultWlNm, setDefaultWlNm] = useState(() => loadSweepSettings().defaultWlNm ?? 1550.0);
   const [gains, setGains] = useState([0, 0, 0, 0]);
+
+  // Persist sweep settings across app restarts (tab switches already keep
+  // state because tab panes stay mounted).
+  useEffect(() => {
+    saveSweepSettings({ startNm, stopNm, speedNmS, powerMw, sampleRateHz, osIdx, defaultWlNm });
+  }, [startNm, stopNm, speedNmS, powerMw, sampleRateHz, osIdx, defaultWlNm]);
 
   const [sweepX, setSweepX] = useState<number[]>([]);
   const [physY, setPhysY] = useState<number[][]>([[], [], [], []]); // stored in W
+  // Full-extent preview kept aside so zooming out restores instantly, and
+  // window fetches can be merged into it. req_id guards against stale replies.
+  const sweepBaseRef = useRef<SweepBase | null>(null);
+  const sweepReqIdRef = useRef(0);
+  const lastZoomRef = useRef<{ x0: number; x1: number } | null>(null);
+  const [zoomDetail, setZoomDetail] = useState<string | null>(null);
+  const [sweepLoadKey, setSweepLoadKey] = useState(0);
+
+  // ---- Add Laser dialog (multi-vendor: Santec / Keysight / EXFO) ----------
+  const [showAddLaser, setShowAddLaser] = useState(false);
+  const [laserIface, setLaserIface] = useState<'tcp' | 'visa' | 'ftdi' | 'serial'>('tcp');
+  const [laserAddr, setLaserAddr] = useState('');
+  const [laserPort, setLaserPort] = useState(5025);
+  const [laserProbing, setLaserProbing] = useState(false);
+  const [laserProbe, setLaserProbe] = useState<Record<string, unknown> | null>(null);
+  const [laserProbeError, setLaserProbeError] = useState<string | null>(null);
+
+  const buildLaserResource = (): string | null => {
+    const a = laserAddr.trim();
+    if (!a) return null;
+    if (laserIface === 'tcp') return `tcp://${a}:${laserPort || 5025}`;
+    if (laserIface === 'ftdi') return `ftdi://SANTEC:${a}`;
+    if (laserIface === 'serial') return `serial://${a}`;
+    return a; // raw VISA string, e.g. GPIB0::10::INSTR
+  };
+
+  const probeLaser = (add: boolean) => {
+    const resource = buildLaserResource();
+    if (!resource) {
+      setLaserProbeError('Enter an address first.');
+      return;
+    }
+    setLaserProbing(true);
+    setLaserProbeError(null);
+    if (!add) setLaserProbe(null);
+    sendControl({ action: add ? 'laser_add' : 'laser_probe', resource });
+  };
   const [samplesTotal, setSamplesTotal] = useState<number | null>(null);
   const [hasSweepData, setHasSweepData] = useState(false);
   const [running, setRunning] = useState(false);
@@ -224,12 +335,12 @@ export default function CaptureTab({
     return out;
   }, [selectedDeviceId, virtualChannels]);
 
+  // Gains are live device state (button-driven, device-echoed) — keep them in
+  // sync. Sample rate / OS are the user's sweep-form intent (persisted in
+  // localStorage): syncing them from the 1 Hz status pushes stomped whatever
+  // the user typed, so they are deliberately NOT tracked here.
   useEffect(() => {
     if (!selectedDevice) return;
-    if (typeof selectedDevice.freq_hz === 'number') {
-      setSampleRateHz(clampSampleRate(Number(selectedDevice.freq_hz)));
-    }
-    if (typeof selectedDevice.os_idx === 'number') setOsIdx(Number(selectedDevice.os_idx));
     if (selectedIsLinear && Array.isArray(selectedDevice.gains) && selectedDevice.gains.length >= 4) {
       setGains(selectedDevice.gains.slice(0, 4).map((v) => Number(v) || 0));
     }
@@ -393,6 +504,63 @@ export default function CaptureTab({
         setSweepX(nextX);
         setPhysY(nextY);
         setHasSweepData(true);
+        sweepBaseRef.current = { x: nextX, y: nextY };
+        lastZoomRef.current = null;
+        sweepReqIdRef.current += 1; // invalidate any in-flight window fetch
+        setZoomDetail(null);
+        setSweepLoadKey((k) => k + 1); // snap charts back to full extent
+        const fullN = Number(msg.full_points);
+        if (Number.isFinite(fullN) && fullN > nextX.length) {
+          addLog(`Preview: ${nextX.length} of ${fullN} points (zoom for full resolution).`);
+        }
+        return;
+      }
+
+      if (msg.action === 'laser_probe' || msg.action === 'laser_add') {
+        setLaserProbing(false);
+        if (!msg.ok) {
+          setLaserProbeError(String(msg.error ?? 'Probe failed'));
+          return;
+        }
+        setLaserProbe(msg as Record<string, unknown>);
+        setLaserProbeError(null);
+        if (msg.action === 'laser_add') {
+          addLog(`Laser saved: ${String(msg.model ?? '?')} @ ${String(msg.resource ?? '')}`);
+          setShowAddLaser(false);
+          doScan();
+        }
+        return;
+      }
+
+      if (msg.action === 'laser_remove') {
+        if (msg.ok) doScan();
+        return;
+      }
+
+      if (msg.action === 'sweep_window') {
+        if (!msg.ok) return; // stale/benign (e.g. sweep cleared server-side)
+        if (Number(msg.req_id) !== sweepReqIdRef.current) return; // superseded
+        const base = sweepBaseRef.current;
+        if (!base) return;
+        const series = Array.isArray(msg.series) ? (msg.series as Array<{ data?: unknown }>) : [];
+        const winX: number[] = [];
+        const winY: number[][] = [[], [], [], []];
+        for (let c = 0; c < 4; c += 1) {
+          const data = Array.isArray(series[c]?.data) ? (series[c]?.data as unknown[]) : [];
+          for (const p of data) {
+            if (!Array.isArray(p) || p.length < 2) continue;
+            const px = Number(p[0]);
+            const py = Number(p[1]);
+            if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+            if (c === 0) winX.push(px);
+            winY[c].push(py);
+          }
+        }
+        if (winX.length < 2) return;
+        const merged = mergeSweepWindow(base, winX, winY, Number(msg.x0_nm), Number(msg.x1_nm));
+        setSweepX(merged.x);
+        setPhysY(merged.y);
+        setZoomDetail(msg.raw ? 'full resolution' : `envelope of ${Number(msg.points_in_window).toLocaleString()} pts`);
         return;
       }
 
@@ -443,16 +611,16 @@ export default function CaptureTab({
       return;
     }
     if (!selectedResource) {
-      warnUser('No laser resource selected. Click Scan VISA, select a resource, then run sweep.');
+      warnUser('No laser resource selected. Click Scan Lasers (or Add Laser), select a resource, then run sweep.');
       return;
     }
     if (resources.length === 0) {
-      warnUser('No scanned laser resources. Click Scan VISA first, then select a resource.');
+      warnUser('No lasers found. Click Scan Lasers or Add Laser first.');
       return;
     }
     const selectedRow = resources.find((r) => r.resource === selectedResource) || null;
     if (!selectedRow) {
-      warnUser('Selected laser resource is not currently visible. Run Scan VISA and select a valid resource.');
+      warnUser('Selected laser is not currently visible. Run Scan Lasers and select a valid resource.');
       return;
     }
     if (!selectedRow.idn || String(selectedRow.idn).trim().length === 0) {
@@ -461,7 +629,7 @@ export default function CaptureTab({
     }
     const selectedModel = (selectedRow.model || gpibModel || '').toString().toUpperCase();
     if (!selectedModel) {
-      warnUser('Unsupported laser model. Supported models: TSL550, TSL570, TSL770.');
+      warnUser('Unsupported laser model. Supported: Santec TSL550/570/770, Keysight N777xC, EXFO T100S/T200S.');
       return;
     }
 
@@ -482,6 +650,12 @@ export default function CaptureTab({
     setSweepX([]);
     setPhysY([[], [], [], []]);
     setHasSweepData(false);
+    // Invalidate any in-flight zoom-window fetch from the PREVIOUS sweep so a
+    // late reply can't resurrect stale data onto the cleared chart.
+    sweepBaseRef.current = null;
+    lastZoomRef.current = null;
+    sweepReqIdRef.current += 1;
+    setZoomDetail(null);
     addLog(`Starting sweep on ${selectedDeviceId}...`);
 
     const channelMask = buildSweepMask(active);
@@ -490,6 +664,7 @@ export default function CaptureTab({
       stop_nm: stopNm,
       speed_nm_s: speedNmS,
       power_mw: powerMw,
+      default_wavelength_nm: defaultWlNm,
       sample_rate_hz: clampedRate,
       os_idx: clampedOsIdx,
       channel_mask: channelMask,
@@ -595,6 +770,39 @@ export default function CaptureTab({
     });
   }, [active, sweepX, physY]);
 
+  // Zoom → ask the backend to re-decimate just the visible window from its
+  // full-resolution store. All cards share one x-axis (charts are connected),
+  // so a single fetch serves every card; math cards recompute client-side
+  // from the merged arrays.
+  const handleZoomWindow = useCallback((win: ZoomWindow) => {
+    const base = sweepBaseRef.current;
+    if (!base || base.x.length === 0) return;
+    if (!win) {
+      if (lastZoomRef.current) {
+        lastZoomRef.current = null;
+        sweepReqIdRef.current += 1; // drop any in-flight window reply
+        setSweepX(base.x);
+        setPhysY(base.y);
+        setZoomDetail(null);
+      }
+      return;
+    }
+    const last = lastZoomRef.current;
+    const span = Math.max(win.x1 - win.x0, 1e-9);
+    if (last && Math.abs(last.x0 - win.x0) < span * 0.02 && Math.abs(last.x1 - win.x1) < span * 0.02) {
+      return; // same window echoed back by a connected chart
+    }
+    lastZoomRef.current = win;
+    const reqId = ++sweepReqIdRef.current;
+    sendControl({
+      action: 'sweep_window',
+      x0_nm: win.x0,
+      x1_nm: win.x1,
+      points: SWEEP_PREVIEW_POINTS_DEFAULT,
+      req_id: reqId,
+    });
+  }, []);
+
   const removeChannel = (id: string) =>
     setActive((prev) => {
       const target = prev.find((c) => c.id === id);
@@ -607,7 +815,8 @@ export default function CaptureTab({
   const addPhysical = (id: string) => {
     const def = PHYS_CHANNELS.find((c) => c.id === id);
     if (!def) return;
-    setActive((prev) => [...prev, { ...def, type: 'physical' }]);
+    // Duplicate card ids break React keys and make drag/close act on both.
+    setActive((prev) => (prev.some((c) => c.id === id) ? prev : [...prev, { ...def, type: 'physical' }]));
   };
 
   const addMath = () => {
@@ -671,7 +880,17 @@ export default function CaptureTab({
 
             <div className="capture-toolbar">
               <button className="btn ghost" onClick={doScan} disabled={scanningVisa}>
-                {scanningVisa ? 'Scanning...' : 'Scan VISA'}
+                {scanningVisa ? 'Scanning...' : 'Scan Lasers'}
+              </button>
+              <button
+                className="btn ghost"
+                onClick={() => {
+                  setLaserProbe(null);
+                  setLaserProbeError(null);
+                  setShowAddLaser(true);
+                }}
+              >
+                Add Laser
               </button>
             </div>
             {scanningVisa && (
@@ -692,13 +911,21 @@ export default function CaptureTab({
                 }}
               >
                 <option value="">Select...</option>
-                {resources.map((r) => (
-                  <option key={r.resource} value={r.resource}>
-                    {r.resource}
-                    {r.model ? ` (${r.model})` : ''}
-                    {r.backend ? ` [${r.backend}]` : ''}
-                  </option>
-                ))}
+                {resources.map((r) => {
+                  const caps = (r as Record<string, any>).capabilities;
+                  const hint = caps && caps.sweep === false
+                    ? ' — set-only'
+                    : caps && caps.host_stepped
+                      ? ' — host-stepped'
+                      : '';
+                  return (
+                    <option key={r.resource} value={r.resource}>
+                      {r.resource}
+                      {r.model ? ` (${r.model}${hint})` : ''}
+                      {r.backend ? ` [${r.backend}]` : ''}
+                    </option>
+                  );
+                })}
               </select>
             </div>
 
@@ -762,6 +989,21 @@ export default function CaptureTab({
                   value={powerMw}
                   onChange={(e) => setPowerMw(Number(e.target.value))}
                 />
+              </div>
+              <div className="capture-field">
+                <label className="capture-label">Default Wavelength (nm)</label>
+                <input
+                  className="capture-input"
+                  type="number"
+                  min="0"
+                  step="0.001"
+                  value={defaultWlNm}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (Number.isFinite(v)) setDefaultWlNm(v);
+                  }}
+                />
+                <div className="capture-hint">Laser parks here after the sweep.</div>
               </div>
             </div>
 
@@ -851,6 +1093,7 @@ export default function CaptureTab({
               {captureMessage || 'Ready'} • Span {estimate.span.toFixed(3)} nm • Duration{' '}
               {estimate.duration.toFixed(2)} s • Est {estimate.samples.toLocaleString()} samples
               {samplesTotal ? ` • Last ${samplesTotal.toLocaleString()} samples` : ''}
+              {zoomDetail ? ` • Zoom: ${zoomDetail}` : ''}
             </div>
 
             <div className="capture-log">
@@ -908,12 +1151,133 @@ export default function CaptureTab({
                     ×
                   </button>
                 </div>
-                <CaptureMiniChart points={ch.points} color={ch.color} unit={ch.unit} />
+                <CaptureMiniChart
+                  points={ch.points}
+                  color={ch.color}
+                  unit={ch.unit}
+                  group={SWEEP_CHART_GROUP}
+                  onZoomWindow={handleZoomWindow}
+                  resetKey={sweepLoadKey}
+                />
               </div>
             ))}
           </div>
         </div>
       </div>
+
+      {showAddLaser && (
+        <div className="modal-backdrop" onClick={() => setShowAddLaser(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <div className="modal-title">Add Laser</div>
+              <button className="btn ghost" onClick={() => setShowAddLaser(false)}>
+                Close
+              </button>
+            </div>
+            <div className="modal-body" style={{ display: 'grid', gap: 12 }}>
+              <div className="capture-field">
+                <label className="capture-label">Interface</label>
+                <select
+                  className="capture-input"
+                  value={laserIface}
+                  onChange={(e) => {
+                    setLaserIface(e.target.value as 'tcp' | 'visa' | 'ftdi' | 'serial');
+                    setLaserProbe(null);
+                    setLaserProbeError(null);
+                  }}
+                >
+                  <option value="tcp">Network (raw SCPI, port 5025)</option>
+                  <option value="visa">GPIB (VISA — needs NI-VISA)</option>
+                  <option value="ftdi">USB — Santec FTDI</option>
+                  <option value="serial">Serial RS-232 (EXFO T100S-HP)</option>
+                </select>
+              </div>
+              <div className="capture-field">
+                <label className="capture-label">
+                  {laserIface === 'tcp'
+                    ? 'IP address / hostname'
+                    : laserIface === 'visa'
+                      ? 'VISA resource (e.g. GPIB0::10::INSTR)'
+                      : laserIface === 'ftdi'
+                        ? 'FTDI serial number'
+                        : 'Serial port (e.g. /dev/tty.usbserial-A1B2 or COM3)'}
+                </label>
+                <input
+                  className="capture-input"
+                  type="text"
+                  value={laserAddr}
+                  onChange={(e) => setLaserAddr(e.target.value)}
+                  placeholder={laserIface === 'tcp' ? '192.168.1.50' : ''}
+                />
+              </div>
+              {laserIface === 'tcp' && (
+                <div className="capture-field">
+                  <label className="capture-label">Port</label>
+                  <input
+                    className="capture-input"
+                    type="number"
+                    min={1}
+                    max={65535}
+                    value={laserPort}
+                    onChange={(e) => {
+                      const v = Number(e.target.value);
+                      if (Number.isFinite(v)) setLaserPort(Math.round(v));
+                    }}
+                  />
+                </div>
+              )}
+              <div className="capture-inline">
+                <button className="btn ghost" onClick={() => probeLaser(false)} disabled={laserProbing}>
+                  {laserProbing ? 'Probing...' : 'Test'}
+                </button>
+                <button
+                  className="btn primary"
+                  onClick={() => probeLaser(true)}
+                  disabled={laserProbing || !laserAddr.trim()}
+                >
+                  Add
+                </button>
+              </div>
+              {laserProbeError && <div className="capture-hint" style={{ color: 'var(--danger)' }}>{laserProbeError}</div>}
+              {laserProbe && (
+                <div className="capture-hint">
+                  {String(laserProbe.vendor ?? '?')} {String(laserProbe.model ?? '?')} — {String(laserProbe.idn ?? '')}
+                  {(() => {
+                    const caps = laserProbe.capabilities as Record<string, unknown> | undefined;
+                    if (!caps) return null;
+                    const bits: string[] = [];
+                    if (caps.sweep === false) bits.push('set-and-hold (no sweep)');
+                    if (caps.host_stepped) bits.push('host-stepped sweeps');
+                    if (caps.lambda_log) bits.push('lambda logging');
+                    if (caps.continuous_sweep) bits.push('continuous sweep');
+                    return bits.length ? ` · ${bits.join(' · ')}` : null;
+                  })()}
+                </div>
+              )}
+              {resources.filter((r) => r.backend !== 'sim').length > 0 && (
+                <div className="capture-field">
+                  <label className="capture-label">Saved / found lasers</label>
+                  {resources.filter((r) => r.backend !== 'sim').map((r) => (
+                    <div key={r.resource} className="capture-inline" style={{ justifyContent: 'space-between' }}>
+                      <span className="capture-hint">
+                        {r.resource}
+                        {r.model ? ` (${r.model})` : ''}
+                      </span>
+                      <button
+                        className="icon-btn"
+                        title="Remove from saved lasers"
+                        onClick={() => sendControl({ action: 'laser_remove', resource: r.resource })}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
       {showAdd && (
         <div className="modal-backdrop" onClick={() => setShowAdd(false)}>

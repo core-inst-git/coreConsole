@@ -3,9 +3,8 @@ import LivePlot from './tabs/LivePlot/LivePlot';
 import ConsoleTab from './tabs/Console/ConsoleTab';
 import CalibrationTab from './tabs/Calibration/CalibrationTab';
 import CaptureTab from './tabs/Capture/CaptureTab';
-import { DeviceStatus, sendControl, subscribeStatus } from './coredaqClient';
+import { ControlMsg, DeviceStatus, sendControl, subscribeControl, subscribeStatus } from './coredaqClient';
 import { VirtualChannelDef, VirtualMathType } from './virtualChannels';
-import picMark from '../../image.png';
 
 const tabs = [
   { id: 'live', label: 'Power Monitor' },
@@ -73,7 +72,36 @@ function loadVirtualChannels(): VirtualChannelDef[] {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('live');
+
+  // Tabs are kept mounted and hidden with CSS; echarts instances size
+  // themselves to 0 while hidden, so nudge them after the pane is shown.
+  useEffect(() => {
+    const t = window.setTimeout(() => window.dispatchEvent(new Event('resize')), 0);
+    return () => window.clearTimeout(t);
+  }, [activeTab]);
   const [showPrefs, setShowPrefs] = useState(false);
+
+  // Manual serial-port control (autodiscovery override)
+  const [serialPorts, setSerialPorts] = useState<
+    { device: string; description: string; connected: boolean; is_coredaq_candidate: boolean }[]
+  >([]);
+  const [portOverride, setPortOverride] = useState<string | null>(null);
+
+  useEffect(() => {
+    sendControl({ action: 'serial_ports_list' });
+    const unsub = subscribeControl((msg: ControlMsg) => {
+      if (msg.action === 'serial_ports_list' && msg.ok && Array.isArray(msg.ports)) {
+        setSerialPorts(msg.ports as typeof serialPorts);
+        if (typeof msg.port_override === 'string' || msg.port_override === null) {
+          setPortOverride((msg.port_override as string | null) ?? null);
+        }
+      } else if (msg.action === 'set_port_override' && msg.ok) {
+        setPortOverride((msg.port_override as string | null) ?? null);
+      }
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [windowSeconds, setWindowSeconds] = useState(5);
   const [maximized, setMaximized] = useState<boolean>(false);
   const [devices, setDevices] = useState<DeviceStatus[]>([]);
@@ -102,7 +130,10 @@ export default function App() {
     return sortedDevices.findIndex((d) => d.device_id === infoDevice.device_id);
   }, [infoDevice, sortedDevices]);
 
-  const connected = devices.length > 0;
+  // Socket-level connectivity is tracked separately from the device list so a
+  // brief backend restart shows "Disconnected" without wiping the layout.
+  const [backendUp, setBackendUp] = useState(true);
+  const connected = backendUp && devices.length > 0;
   const anyStreaming = devices.some((d) => !!d.streaming);
 
   const selectActiveDevice = (deviceId: string) => {
@@ -114,7 +145,20 @@ export default function App() {
   useEffect(() => {
     let alive = true;
     const unsub = subscribeStatus((s) => {
-      const rows = Array.isArray(s.devices) ? s.devices : [];
+      // Synthetic disconnect statuses (socket close) carry no `devices` field;
+      // keep the last known list so a sub-second backend restart doesn't wipe
+      // buffers and card layout. Real backend statuses always include it.
+      if (!Array.isArray(s.devices)) {
+        if (s.connected === false) setBackendUp(false);
+        return;
+      }
+      setBackendUp(true);
+      if (typeof (s as Record<string, unknown>).port_override === 'string') {
+        setPortOverride((s as Record<string, unknown>).port_override as string);
+      } else if ((s as Record<string, unknown>).port_override === null) {
+        setPortOverride(null);
+      }
+      const rows = s.devices;
       const unsupported = rows.find((r) => r?.unsupported_firmware);
       if (unsupported?.unsupported_firmware) {
         if (!unsupportedPopupShown.current) {
@@ -208,9 +252,14 @@ export default function App() {
     <div className="app">
       <header className="topbar window-drag">
         <div className="brand">
-          <div className="brand-mark" />
           <div>
-            <div className="brand-title">coreDAQ</div>
+            {/* Product wordmark per the coreX brand sheet: `core` medium +
+                bold accent suffix. The coupler X glyph is company-only and
+                lives in the sidebar footer lockup — never on product names. */}
+            <div className="brand-title">
+              <span className="product-core">core</span>
+              <span className="product-suffix">Console</span>
+            </div>
             <div className="brand-sub">
               <a
                 className="brand-link window-no-drag"
@@ -218,7 +267,7 @@ export default function App() {
                 target="_blank"
                 rel="noreferrer"
               >
-                Core - Instrumentation
+                coreX — Instrumentation
               </a>
             </div>
           </div>
@@ -299,18 +348,85 @@ export default function App() {
                 </div>
               );
             })}
+
+            <div className="port-select-row">
+              <span className="device-manager-head">Port</span>
+              <select
+                className="pref-input port-select"
+                value={portOverride ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  sendControl({ action: 'set_port_override', port: v || null });
+                }}
+                title="Pin the coreDAQ to a specific serial port (Auto = discover)"
+              >
+                <option value="">Auto (discover)</option>
+                {serialPorts.map((p) => (
+                  <option key={p.device} value={p.device}>
+                    {p.device}
+                    {p.is_coredaq_candidate ? ' ●' : ''}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="icon-btn"
+                title="Refresh port list"
+                onClick={() => sendControl({ action: 'serial_ports_list' })}
+              >
+                ↻
+              </button>
+            </div>
           </div>
 
           <div className="sidebar-footer">
-            <div className="pic-badge" aria-hidden="true">
-              <img src={picMark} alt="PIC" className="pic-badge-image" />
+            {/* coreX company lockup — canonical 2x2 fiber-coupler X glyph. */}
+            <span className="corex-logo" aria-label="coreX">
+              <span className="corex-core">core</span>
+              <svg className="corex-x" viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                  <linearGradient id="corex-beam" x1="0" y1="0" x2="1" y2="0">
+                    <stop offset="0" stopColor="#66E3F0" />
+                    <stop offset="1" stopColor="#3B82C4" />
+                  </linearGradient>
+                </defs>
+                <path
+                  d="M9,58 C36,58 36,14 63,14"
+                  fill="none"
+                  stroke="url(#corex-beam)"
+                  strokeWidth="11"
+                  strokeLinecap="round"
+                  opacity="0.75"
+                />
+                <path
+                  d="M9,14 C36,14 36,58 63,58"
+                  fill="none"
+                  stroke="url(#corex-beam)"
+                  strokeWidth="11"
+                  strokeLinecap="round"
+                />
+                <circle cx="36" cy="36" r="6.5" fill="#EAF7FA" />
+              </svg>
+            </span>
+            <div className="footer-version">coreConsole v{__APP_VERSION__}</div>
+            <a
+              className="footer-company window-no-drag"
+              href="https://core-instrumentation.com"
+              target="_blank"
+              rel="noreferrer"
+            >
+              core-instrumentation.com
+            </a>
+            <div className="footer-legal">
+              coreX — Instrumentation UG (haftungsbeschränkt) · Heidelberg, Germany
             </div>
-            <div className="pic-caption">PIC Suite</div>
           </div>
         </nav>
 
         <main className="main">
-          {activeTab === 'live' && (
+          {/* All tabs stay mounted; inactive ones are hidden with CSS so their
+              local state (sweep settings, logs, plots, console history)
+              survives tab switches. */}
+          <div className={`tab-pane${activeTab === 'live' ? '' : ' tab-pane-hidden'}`}>
             <LivePlot
               windowSeconds={windowSeconds}
               devices={devices}
@@ -321,8 +437,8 @@ export default function App() {
               onAddVirtualChannel={addVirtualChannel}
               onRemoveVirtualChannel={removeVirtualChannel}
             />
-          )}
-          {activeTab === 'capture' && (
+          </div>
+          <div className={`tab-pane${activeTab === 'capture' ? '' : ' tab-pane-hidden'}`}>
             <CaptureTab
               connected={connected}
               devices={devices}
@@ -332,23 +448,23 @@ export default function App() {
               onAddVirtualChannel={addVirtualChannel}
               onRemoveVirtualChannel={removeVirtualChannel}
             />
-          )}
-          {activeTab === 'console' && (
+          </div>
+          <div className={`tab-pane${activeTab === 'console' ? '' : ' tab-pane-hidden'}`}>
             <ConsoleTab
               connected={connected}
               devices={devices}
               activeDeviceId={activeDeviceId}
               onSelectDevice={selectActiveDevice}
             />
-          )}
-          {activeTab === 'cal' && (
+          </div>
+          <div className={`tab-pane${activeTab === 'cal' ? '' : ' tab-pane-hidden'}`}>
             <CalibrationTab
               connected={connected}
               devices={devices}
               activeDeviceId={activeDeviceId}
               onSelectDevice={selectActiveDevice}
             />
-          )}
+          </div>
         </main>
       </div>
 
