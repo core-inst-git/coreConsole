@@ -363,6 +363,20 @@ class CoreDAQBackend:
 
         return s
 
+    @staticmethod
+    def _enumerate_ports_sync() -> tuple[list[str], set[str]]:
+        """Non-invasive: OS port listing only, nothing is opened.
+        Returns (coredaq_candidate_ports, all_present_port_devices)."""
+        from serial.tools import list_ports
+        candidates: list[str] = []
+        all_devs: set[str] = set()
+        for p in list_ports.comports():
+            all_devs.add(p.device)
+            desc = (p.description or "").lower()
+            if (p.vid == 0x0483 and p.pid == 0x5740) or "coredaq" in desc                     or "core_instrumentation" in desc:
+                candidates.append(p.device)
+        return candidates, all_devs
+
     async def discover_devices(self, force: bool = False) -> None:
         if self.discovery_in_flight:
             return
@@ -374,17 +388,33 @@ class CoreDAQBackend:
         try:
             if self.simulator:
                 candidate_ports = [f"SIM{i + 1}" for i in range(self.sim_count)]
+                present = set(candidate_ports)
             elif self.port_override:
                 candidate_ports = [self.port_override]
+                present = set(candidate_ports)
+            elif self.devices or self.unsupported_ports:
+                # Sessions are open: NEVER probe-open ports here. Probing can
+                # open the very tty a live session holds and inject IDN? into
+                # the 500 Hz stream (corruption), and a busy-port open failure
+                # made discovery drop the session as "unplugged" every pass.
+                # New devices are found from the OS port listing (VID/PID
+                # match, nothing opened); a held port only counts as gone when
+                # it disappears from the OS enumeration (true unplug).
+                candidates, all_devs = await asyncio.to_thread(
+                    self._enumerate_ports_sync)
+                held = set(self.port_to_device.keys())
+                candidate_ports = [p for p in candidates if p not in held]
+                present = all_devs
             else:
+                # Nothing connected yet: full probe discovery is safe (it can
+                # also find devices with non-standard USB descriptors).
                 try:
                     candidate_ports = await asyncio.to_thread(
                         coreDAQ.discover, 115200, self.timeout_s)
                 except Exception as err:
                     log("discover failed:", err)
                     candidate_ports = []
-
-            present = set(candidate_ports)
+                present = set(candidate_ports)
 
             for port, device_id in list(self.port_to_device.items()):
                 if port not in present:
