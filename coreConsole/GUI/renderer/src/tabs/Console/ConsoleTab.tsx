@@ -16,8 +16,14 @@ export default function ConsoleTab({ connected, devices, activeDeviceId, onSelec
     [devices]
   );
 
+  const MAX_CONSOLE_LINES = 2000;
   const [targetDeviceId, setTargetDeviceId] = useState('');
   const [lines, setLines] = useState<Line[]>([]);
+  const pushLine = (prev: Line[], line: Line): Line[] => {
+    const next = prev.length >= MAX_CONSOLE_LINES ? prev.slice(-(MAX_CONSOLE_LINES - 1)) : [...prev];
+    next.push(line);
+    return next;
+  };
   const [input, setInput] = useState('');
 
   useEffect(() => {
@@ -37,17 +43,11 @@ export default function ConsoleTab({ connected, devices, activeDeviceId, onSelec
     setInput('');
 
     if (!connected) {
-      setLines((prev) => [
-        ...prev,
-        { dir: 'rx', text: 'ERR Not connected', ts: new Date().toLocaleTimeString() },
-      ]);
+      setLines((prev) => pushLine(prev, { dir: 'rx', text: 'ERR Not connected', ts: new Date().toLocaleTimeString() }));
       return;
     }
     if (!targetDeviceId) {
-      setLines((prev) => [
-        ...prev,
-        { dir: 'rx', text: 'ERR No target device selected', ts: new Date().toLocaleTimeString() },
-      ]);
+      setLines((prev) => pushLine(prev, { dir: 'rx', text: 'ERR No target device selected', ts: new Date().toLocaleTimeString() }));
       return;
     }
 
@@ -56,15 +56,14 @@ export default function ConsoleTab({ connected, devices, activeDeviceId, onSelec
 
   useEffect(() => {
     const unsub = subscribeConsole((msg) => {
-      setLines((prev) => [
-        ...prev,
-        {
+      setLines((prev) =>
+        pushLine(prev, {
           dir: msg.dir,
           text: msg.text,
           ts: new Date().toLocaleTimeString(),
           deviceId: msg.device_id || null,
-        },
-      ]);
+        })
+      );
     });
     return () => unsub();
   }, []);

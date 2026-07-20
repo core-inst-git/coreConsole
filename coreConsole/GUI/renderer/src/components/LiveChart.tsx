@@ -4,11 +4,10 @@ import * as echarts from 'echarts';
 export type LiveSeries = {
   name: string;
   color: string;
-  data: number[];
+  points: [number, number][];
 };
 
 type Props = {
-  x: number[];
   series: LiveSeries[];
   unit?: string;
   compact?: boolean;
@@ -40,14 +39,18 @@ function formatMeasurement(value: unknown): string {
   return n.toFixed(3);
 }
 
-export default function LiveChart({ x, series, unit = 'W', compact = false }: Props) {
+export default function LiveChart({ series, unit = 'W', compact = false }: Props) {
   const chartRef = useRef<HTMLDivElement | null>(null);
   const instRef = useRef<echarts.EChartsType | null>(null);
+  const unitRef = useRef(unit);
+  unitRef.current = unit;
 
   useEffect(() => {
     if (!chartRef.current) return;
     const inst = echarts.init(chartRef.current, undefined, { renderer: 'canvas' });
     instRef.current = inst;
+    // Stable handle for E2E tests (drive zoom/read state via CDP).
+    (chartRef.current as any).__echarts = inst;
 
     const option: echarts.EChartsOption = {
       backgroundColor: 'transparent',
@@ -62,48 +65,52 @@ export default function LiveChart({ x, series, unit = 'W', compact = false }: Pr
       tooltip: {
         trigger: 'axis',
         axisPointer: { type: 'line' },
-        backgroundColor: 'rgba(10,14,18,0.9)',
-        borderColor: '#2a3540',
-        textStyle: { color: '#e7eef6', fontFamily: 'JetBrains Mono' },
+        backgroundColor: 'rgba(11,14,19,0.92)',
+        borderColor: '#1C2230',
+        textStyle: { color: '#E8ECF2', fontFamily: 'ui-monospace, SF Mono, Menlo, monospace' },
         formatter: (params: any) => {
           const rows = Array.isArray(params) ? params : [params];
           if (rows.length === 0) return '';
-          const header = formatTimeSeconds(rows[0]?.axisValue ?? rows[0]?.axisValueLabel);
+          const first = Array.isArray(rows[0]?.value) ? rows[0].value[0] : rows[0]?.axisValue;
+          const header = formatTimeSeconds(first);
           const body = rows.map((row: any) => {
-            const raw = Array.isArray(row?.value) ? row.value[row.value.length - 1] : row?.value;
+            const raw = Array.isArray(row?.value) ? row.value[1] : row?.value;
             const y = formatMeasurement(raw);
-            return `${row?.marker ?? ''} ${row?.seriesName ?? ''} ${y} ${unit}`;
+            return `${row?.marker ?? ''} ${row?.seriesName ?? ''} ${y} ${unitRef.current}`;
           });
           return [header, ...body].join('<br/>');
         }
       },
       xAxis: {
-        type: 'category',
-        data: x,
-        boundaryGap: false,
-        axisLine: { lineStyle: { color: '#2a3540' } },
+        // Value axis: points carry their own x. (A category axis forced one
+        // string label per sample — thousands of categories per repaint.)
+        type: 'value',
+        min: 'dataMin',
+        max: 'dataMax',
+        axisLine: { lineStyle: { color: '#1C2230' } },
         axisTick: { show: false },
         axisLabel: compact
-          ? { color: '#9fb0c2', formatter: (v: string) => `${Number(v).toFixed(1)}s`, fontSize: 10, margin: 8 }
-          : { color: '#9fb0c2', formatter: (v: string) => `${Number(v).toFixed(1)}s`, margin: 8 },
+          ? { color: '#8B94A3', formatter: (v: number) => `${v.toFixed(1)}s`, fontSize: 10, margin: 8 }
+          : { color: '#8B94A3', formatter: (v: number) => `${v.toFixed(1)}s`, margin: 8 },
         splitLine: { show: false }
       },
       yAxis: {
         type: 'value',
         scale: true,
-        axisLine: { lineStyle: { color: '#2a3540' } },
+        axisLine: { lineStyle: { color: '#1C2230' } },
         axisTick: { show: false },
         axisLabel: compact
-          ? { color: '#9fb0c2', formatter: (v: number) => `${formatAxisValue(v)} ${unit}`, fontSize: 10, margin: 8 }
-          : { color: '#9fb0c2', formatter: (v: number) => `${formatAxisValue(v)} ${unit}`, margin: 8 },
-        splitLine: { lineStyle: { color: '#1b232c' } }
+          ? { color: '#8B94A3', formatter: (v: number) => `${formatAxisValue(v)} ${unitRef.current}`, fontSize: 10, margin: 8 }
+          : { color: '#8B94A3', formatter: (v: number) => `${formatAxisValue(v)} ${unitRef.current}`, margin: 8 },
+        splitLine: { lineStyle: { color: '#1A202C' } }
       },
       series: series.map((s) => ({
         name: s.name,
         type: 'line',
-        data: s.data,
+        data: s.points,
         showSymbol: false,
         smooth: false,
+        animation: false,
         lineStyle: { width: 2, color: s.color },
         emphasis: { focus: 'series' }
       }))
@@ -113,38 +120,31 @@ export default function LiveChart({ x, series, unit = 'W', compact = false }: Pr
 
     const handleResize = () => inst.resize();
     window.addEventListener('resize', handleResize);
+    const ro = new ResizeObserver(() => inst.resize());
+    ro.observe(chartRef.current);
 
     return () => {
+      ro.disconnect();
       window.removeEventListener('resize', handleResize);
       inst.dispose();
+      instRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
     if (!instRef.current) return;
-    instRef.current.setOption({
-      tooltip: {
-        formatter: (params: any) => {
-          const rows = Array.isArray(params) ? params : [params];
-          if (rows.length === 0) return '';
-          const header = formatTimeSeconds(rows[0]?.axisValue ?? rows[0]?.axisValueLabel);
-          const body = rows.map((row: any) => {
-            const raw = Array.isArray(row?.value) ? row.value[row.value.length - 1] : row?.value;
-            const y = formatMeasurement(raw);
-            return `${row?.marker ?? ''} ${row?.seriesName ?? ''} ${y} ${unit}`;
-          });
-          return [header, ...body].join('<br/>');
-        }
+    instRef.current.setOption(
+      {
+        series: series.map((s) => ({
+          name: s.name,
+          data: s.points,
+          lineStyle: { width: 2, color: s.color }
+        }))
       },
-      yAxis: {
-        axisLabel: {
-          formatter: (v: number) => `${formatAxisValue(v)} ${unit}`
-        }
-      },
-      xAxis: { data: x },
-      series: series.map((s) => ({ data: s.data }))
-    });
-  }, [x, series, unit]);
+      { lazyUpdate: true }
+    );
+  }, [series]);
 
   return <div className="chart" ref={chartRef} />;
 }

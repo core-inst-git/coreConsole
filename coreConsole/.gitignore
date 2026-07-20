@@ -7,7 +7,7 @@ GUI/renderer/dist/
 GUI/release/
 GUI/.electron-cache/
 GUI/dist/
-GUI/build/
+# GUI/build holds electron-builder buildResources (app icons) — tracked.
 GUI/backend/bin/
 GUI/backend/build/
 GUI/backend/dist/

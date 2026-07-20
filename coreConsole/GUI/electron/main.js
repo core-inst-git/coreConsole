@@ -1,16 +1,18 @@
-const { app, BrowserWindow, dialog, ipcMain } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { Menu } = require('electron');
 const { spawn } = require('child_process');
-const { VisaServiceClient } = require('./visaServiceClient');
 
 const isDev = !app.isPackaged;
 const devURL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
+const WS_PORT = process.env.COREDAQ_WS_PORT || '8765';
 
 let mainWindow;
 let backendProc;
-let visaClient;
+let backendRestarts = 0;
+let backendStartedAt = 0;
+let quitting = false;
 
 function emitWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -22,11 +24,17 @@ function emitWindowState() {
 
 function loadAppHome() {
   if (!mainWindow) return;
-  if (isDev) {
-    mainWindow.loadURL(devURL);
-  } else {
-    mainWindow.loadFile(path.join(__dirname, '../renderer/dist/index.html'));
-  }
+  const p = isDev
+    ? mainWindow.loadURL(devURL)
+    : mainWindow.loadFile(path.join(__dirname, '../renderer/dist/index.html'));
+  p.catch((err) => console.error('[coreConsole] failed to load app page:', err));
+  // ready-to-show never fires if the initial load fails; don't leave the
+  // window invisible forever.
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.isVisible()) {
+      mainWindow.show();
+    }
+  }, 5000);
 }
 
 function goBackOrHome() {
@@ -71,15 +79,15 @@ function injectBackButtonIfNeeded() {
         b.textContent = label;
         b.style.padding = '8px 12px';
         b.style.borderRadius = '999px';
-        b.style.border = '1px solid rgba(77, 208, 225, 0.65)';
-        b.style.background = 'rgba(12, 18, 28, 0.9)';
-        b.style.color = '#dffaff';
+        b.style.border = '1px solid rgba(95, 224, 238, 0.55)';
+        b.style.background = 'rgba(11, 14, 19, 0.9)';
+        b.style.color = '#EAF7FA';
         b.style.fontSize = '12px';
         b.style.fontWeight = '600';
         b.style.cursor = 'pointer';
         b.style.boxShadow = '0 6px 16px rgba(0,0,0,0.35)';
-        b.addEventListener('mouseenter', () => { b.style.borderColor = 'rgba(77, 208, 225, 0.95)'; });
-        b.addEventListener('mouseleave', () => { b.style.borderColor = 'rgba(77, 208, 225, 0.65)'; });
+        b.addEventListener('mouseenter', () => { b.style.borderColor = 'rgba(95, 224, 238, 0.9)'; });
+        b.addEventListener('mouseleave', () => { b.style.borderColor = 'rgba(95, 224, 238, 0.55)'; });
         return b;
       };
 
@@ -113,7 +121,7 @@ function createWindow() {
     height: 900,
     minWidth: 1100,
     minHeight: 700,
-    backgroundColor: '#0b0f14',
+    backgroundColor: '#0B0E13',
     frame: false,
     titleBarStyle: 'hidden',
     trafficLightPosition: { x: -100, y: -100 },
@@ -121,14 +129,21 @@ function createWindow() {
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      additionalArguments: [`--coredaq-ws-port=${WS_PORT}`]
     }
   });
 
-  // Keep navigation in one window so View->Back can return to the app.
+  // External links open in the system browser: navigating the app window to
+  // arbitrary origins would expose the preload API surface to those pages.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    mainWindow.loadURL(url);
+    if (/^https?:/i.test(url)) shell.openExternal(url).catch(() => {});
     return { action: 'deny' };
+  });
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isAppPage(url)) return;
+    event.preventDefault();
+    if (/^https?:/i.test(url)) shell.openExternal(url).catch(() => {});
   });
 
   mainWindow.webContents.on('did-finish-load', () => {
@@ -206,110 +221,116 @@ function buildMenu() {
   Menu.setApplicationMenu(menu);
 }
 
+// Resolve the Python interpreter that runs the backend.
+// Priority: COREDAQ_BUNDLED_PYTHON env -> bundled runtime in a packaged app ->
+// system python. (Phase 3 packaging ships a self-contained runtime under
+// resources/python so end users need no separate Python install.)
+function resolvePythonExe() {
+  if (process.env.COREDAQ_BUNDLED_PYTHON && fs.existsSync(process.env.COREDAQ_BUNDLED_PYTHON)) {
+    return process.env.COREDAQ_BUNDLED_PYTHON;
+  }
+  if (!isDev && process.resourcesPath) {
+    const candidates = process.platform === 'win32'
+      ? [path.join(process.resourcesPath, 'python', 'python.exe')]
+      : [path.join(process.resourcesPath, 'python', 'bin', 'python3')];
+    for (const c of candidates) {
+      if (fs.existsSync(c)) return c;
+    }
+  }
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
+
 function startBackend() {
-  const startJsBackend = () => {
-    const script = path.join(__dirname, '../backend/coredaq_service.js');
-    if (!fs.existsSync(script)) {
-      console.error(`[coreConsole] JS backend script not found: ${script}`);
+  // Packaged builds ship a self-contained PyInstaller backend (no Python
+  // install needed on the target machine); dev runs the script directly.
+  const bundledBin = process.resourcesPath
+    ? path.join(
+        process.resourcesPath, 'backend', 'coredaq-backend',
+        process.platform === 'win32' ? 'coredaq-backend.exe' : 'coredaq-backend'
+      )
+    : null;
+  const useBundled = !isDev && bundledBin && fs.existsSync(bundledBin);
+
+  const script = path.join(__dirname, '..', 'backend', 'coredaq_service.py');
+  if (!useBundled && !fs.existsSync(script)) {
+    console.error(`[coreConsole] Python backend not found (no bundled binary, no ${script})`);
+    return;
+  }
+
+  const pythonExe = useBundled ? bundledBin : resolvePythonExe();
+  const wsPort = WS_PORT;
+  const args = useBundled
+    ? ['--ws-port', String(wsPort)]
+    : [script, '--ws-port', String(wsPort)];
+  if (process.env.COREDAQ_SIMULATOR === '1') {
+    args.push('--simulator');
+    if (process.env.COREDAQ_SIM_FRONTEND) args.push('--sim-frontend', process.env.COREDAQ_SIM_FRONTEND);
+    if (process.env.COREDAQ_SIM_DETECTOR) args.push('--sim-detector', process.env.COREDAQ_SIM_DETECTOR);
+    if (process.env.COREDAQ_SIM_COUNT) args.push('--sim-count', process.env.COREDAQ_SIM_COUNT);
+  }
+  if (process.env.COREDAQ_PORT) args.push('--port', process.env.COREDAQ_PORT);
+
+  const env = { ...process.env };
+  // Unbuffered stdout/stderr so backend logs appear immediately in the console.
+  env.PYTHONUNBUFFERED = '1';
+
+  backendStartedAt = Date.now();
+  backendProc = spawn(pythonExe, args, {
+    stdio: 'inherit',
+    env,
+    cwd: useBundled ? path.dirname(bundledBin) : path.dirname(script),
+  });
+  console.log(`[coreConsole] Starting Python backend: ${pythonExe} ${args.join(' ')}`);
+  backendProc.on('error', (err) => {
+    console.error(`Failed to start Python backend (${pythonExe})`, err);
+  });
+  backendProc.on('close', (code, sig) => {
+    const proc = backendProc;
+    backendProc = null;
+    if (quitting) return;
+    console.error(`[coreConsole] Python backend exited code=${code} sig=${sig || ''}`);
+    // Restart with backoff. The renderer shows "disconnected" while down
+    // (its client synthesizes an offline status on socket close).
+    const aliveMs = Date.now() - backendStartedAt;
+    if (aliveMs > 30_000) backendRestarts = 0; // stable run resets the budget
+    if (backendRestarts >= 5) {
+      dialog.showMessageBox({
+        type: 'error',
+        buttons: ['OK'],
+        title: 'Backend unavailable',
+        message: 'The device backend keeps crashing.',
+        detail: 'coreConsole restarted it 5 times without success. ' +
+          'Check that no other program holds the device/port, then restart the app.',
+      }).catch(() => {});
       return;
     }
-
-    const env = {
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: '1',
-    };
-
-    const apiPath = isDev
-      ? path.resolve(__dirname, '..', '..', 'API')
-      : path.join(process.resourcesPath, 'API');
-    const laserJsPath = isDev
-      ? path.resolve(__dirname, '..', '..', 'packages', 'laser-js')
-      : path.join(process.resourcesPath, 'laser-js');
-    const guiNodeModulesPath = isDev
-      ? path.resolve(__dirname, '..', 'node_modules')
-      : path.join(process.resourcesPath, 'app.asar', 'node_modules');
-    if (fs.existsSync(apiPath)) env.COREDAQ_API_PATH = apiPath;
-    if (fs.existsSync(laserJsPath)) env.COREDAQ_LASER_JS_PATH = laserJsPath;
-    if (fs.existsSync(guiNodeModulesPath)) env.COREDAQ_GUI_NODE_MODULES_PATH = guiNodeModulesPath;
-
-    const addonPath = isDev
-      ? path.resolve(__dirname, '..', '..', 'packages', 'visa-addon', 'build', 'Release', 'visa_addon.node')
-      : path.join(process.resourcesPath, 'visa-addon', 'build', 'Release', 'visa_addon.node');
-    if (fs.existsSync(addonPath)) {
-      env.COREDAQ_VISA_ADDON_PATH = addonPath;
-      env.VISA_ADDON_PATH = addonPath;
-    }
-
-    backendProc = spawn(process.execPath, [script], {
-      stdio: 'inherit',
-      env,
-      cwd: path.join(__dirname, '..'),
-    });
-    console.log(`[coreConsole] Starting JS backend: ${script}`);
-    backendProc.on('error', (err) => {
-      console.error(`Failed to start JS backend at ${script}`, err);
-    });
-  };
-  startJsBackend();
-}
-
-function shouldEnableVisaService() {
-  if (process.env.COREDAQ_DISABLE_GPIB_SERVICE === '1') return false;
-  return true;
-}
-
-function showVisaBootErrorDialog(err) {
-  const code = String(err?.code || 'VISA_BOOT_ERROR');
-  const message = String(err?.message || 'Failed to start VISA service');
-  const checked = Array.isArray(err?.checkedPaths) ? err.checkedPaths : [];
-  const fix = String(
-    err?.fix ||
-    (code === 'NI_VISA_NOT_FOUND'
-      ? 'Install NI-VISA (and NI-488.2 for GPIB), then restart the app.'
-      : 'Check NI-VISA installation and addon packaging, then retry.')
-  );
-  const detail = [
-    `Code: ${code}`,
-    `Message: ${message}`,
-    checked.length ? `Checked paths:\n${checked.join('\n')}` : '',
-    `Fix: ${fix}`,
-  ].filter(Boolean).join('\n\n');
-
-  dialog.showMessageBox({
-    type: code === 'NI_VISA_NOT_FOUND' ? 'error' : 'warning',
-    buttons: ['OK'],
-    title: 'GPIB Driver Setup',
-    message: 'VISA/GPIB service is unavailable.',
-    detail,
-  }).catch(() => {});
-}
-
-async function startVisaService() {
-  if (!shouldEnableVisaService()) return;
-  if (visaClient) return;
-
-  visaClient = new VisaServiceClient({
-    isDev,
-    autoRestart: true,
-    onBootError: showVisaBootErrorDialog,
-    onBootOk: (_health) => {
-      // no-op; consumers call gpib:health on demand
-    },
+    backendRestarts += 1;
+    const delay = Math.min(5000, 500 * 2 ** backendRestarts);
+    console.error(`[coreConsole] restarting backend in ${delay} ms (attempt ${backendRestarts}/5)`);
+    setTimeout(() => {
+      if (!quitting) startBackend();
+    }, delay);
+    void proc;
   });
-
-  try {
-    await visaClient.start();
-  } catch (err) {
-    console.warn('[coreConsole] VISA service failed to start:', err);
-    showVisaBootErrorDialog(err);
-  }
 }
+
+// Second instances would fight over port 8765 and the serial device.
+const gotInstanceLock = app.requestSingleInstanceLock();
+if (!gotInstanceLock) {
+  app.quit();
+}
+app.on('second-instance', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
 
 app.whenReady().then(() => {
+  if (!gotInstanceLock) return;
   createWindow();
   buildMenu();
   startBackend();
-  startVisaService();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -320,13 +341,27 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
 
-app.on('before-quit', () => {
-  if (backendProc) {
-    backendProc.kill();
-  }
-  if (visaClient) {
-    visaClient.stop().catch(() => {});
-  }
+app.on('before-quit', (event) => {
+  quitting = true;
+  if (!backendProc) return;
+  // Defer quitting until the backend is actually dead — otherwise Electron
+  // exits before the escalation timer can fire and a wedged backend becomes
+  // an orphan holding port 8765 and the serial device.
+  event.preventDefault();
+  const proc = backendProc;
+  backendProc = null;
+  proc.kill(); // SIGTERM — backend finalizes any live recording
+  const killer = setTimeout(() => {
+    try {
+      proc.kill('SIGKILL');
+    } catch {
+      // already gone
+    }
+  }, 2000);
+  proc.once('close', () => {
+    clearTimeout(killer);
+    app.quit(); // re-enters before-quit; backendProc is null now, so it passes
+  });
 });
 
 // Placeholder IPC hooks for backend integration
@@ -376,83 +411,3 @@ ipcMain.handle('coredaq:pick-save-path', async (_event, opts) => {
   };
 });
 
-ipcMain.handle('gpib:health', async () => {
-  if (!shouldEnableVisaService()) {
-    return {
-      enabled: false,
-      reason: 'GPIB service disabled on this platform/config',
-    };
-  }
-  await startVisaService();
-  const health = await visaClient.health();
-  return {
-    enabled: true,
-    ...health,
-  };
-});
-
-ipcMain.handle('gpib:list', async () => {
-  await startVisaService();
-  if (!visaClient) throw new Error('GPIB service unavailable');
-  const resources = await visaClient.request('listResources', {});
-  return Array.isArray(resources) ? resources : [];
-});
-
-ipcMain.handle('gpib:open', async (_event, payload) => {
-  await startVisaService();
-  if (!visaClient) throw new Error('GPIB service unavailable');
-  const resource = String(payload?.resource || '').trim();
-  return visaClient.request('open', { resource, timeoutMs: payload?.timeoutMs });
-});
-
-ipcMain.handle('gpib:write', async (_event, payload) => {
-  await startVisaService();
-  if (!visaClient) throw new Error('GPIB service unavailable');
-  return visaClient.request('write', {
-    sessionId: payload?.sessionId,
-    command: payload?.command,
-  });
-});
-
-ipcMain.handle('gpib:read', async (_event, payload) => {
-  await startVisaService();
-  if (!visaClient) throw new Error('GPIB service unavailable');
-  return visaClient.request('read', {
-    sessionId: payload?.sessionId,
-    maxBytes: payload?.maxBytes,
-  });
-});
-
-ipcMain.handle('gpib:query', async (_event, payload) => {
-  await startVisaService();
-  if (!visaClient) throw new Error('GPIB service unavailable');
-  return visaClient.request('query', {
-    sessionId: payload?.sessionId,
-    resource: payload?.resource,
-    command: payload?.command,
-    maxBytes: payload?.maxBytes,
-    timeoutMs: payload?.timeoutMs,
-  });
-});
-
-ipcMain.handle('gpib:set-timeout', async (_event, payload) => {
-  await startVisaService();
-  if (!visaClient) throw new Error('GPIB service unavailable');
-  return visaClient.request('setTimeout', {
-    sessionId: payload?.sessionId,
-    ms: payload?.ms,
-  });
-});
-
-ipcMain.handle('gpib:close', async (_event, payload) => {
-  await startVisaService();
-  if (!visaClient) throw new Error('GPIB service unavailable');
-  return visaClient.request('close', { sessionId: payload?.sessionId });
-});
-
-ipcMain.handle('gpib:restart-service', async () => {
-  await startVisaService();
-  if (!visaClient) throw new Error('GPIB service unavailable');
-  await visaClient.restart();
-  return { ok: true };
-});

@@ -72,8 +72,9 @@ export type StreamMsg = {
   type: 'stream';
   device_id?: string;
   frontend_type?: FrontendType | null;
-  ts: number;
-  ch: number[];
+  /** Batched samples: t[i] pairs with ch[channel][i]; one message per ~25 ms. */
+  t: number[];
+  ch: number[][];
 };
 
 export type ConsoleMsg = {
@@ -100,39 +101,101 @@ const streamHandlers = new Set<Handler<StreamMsg>>();
 const consoleHandlers = new Set<Handler<ConsoleMsg>>();
 const controlHandlers = new Set<Handler<ControlMsg>>();
 
+// The backend port is normally 8765 but can be moved with COREDAQ_WS_PORT;
+// Electron main passes the effective port through the preload bridge.
+const WS_PORT = (window as any).coredaq?.wsPort || 8765;
+
 let ws: WebSocket | null = null;
 let reconnectTimer: number | null = null;
+let wasOpen = false;
+
+// Commands issued while the socket is down are queued (bounded) and flushed on
+// reconnect instead of being silently dropped.
+const pendingMessages: string[] = [];
+const MAX_PENDING_MESSAGES = 128;
+
+function enqueueMessage(raw: string) {
+  if (pendingMessages.length >= MAX_PENDING_MESSAGES) pendingMessages.shift();
+  pendingMessages.push(raw);
+}
+
+function flushPendingMessages() {
+  while (ws && ws.readyState === WebSocket.OPEN && pendingMessages.length > 0) {
+    const raw = pendingMessages.shift();
+    if (raw) ws.send(raw);
+  }
+}
+
+/** Dispatch to every handler; one throwing subscriber must not starve the rest. */
+function dispatch<T>(handlers: Set<Handler<T>>, msg: T) {
+  handlers.forEach((h) => {
+    try {
+      h(msg);
+    } catch (err) {
+      console.error('[coredaqClient] subscriber error', err);
+    }
+  });
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer !== null) return;
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = null;
+    connect();
+  }, 1000);
+}
 
 function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
     return;
   }
 
-  ws = new WebSocket('ws://127.0.0.1:8765');
+  try {
+    ws = new WebSocket(`ws://127.0.0.1:${WS_PORT}`);
+  } catch {
+    ws = null;
+    scheduleReconnect();
+    return;
+  }
+
+  ws.onopen = () => {
+    wasOpen = true;
+    flushPendingMessages();
+  };
+
+  ws.onerror = () => {
+    // onclose follows; nothing to do, but keep the handler so errors are not
+    // reported as unhandled by some environments.
+  };
 
   ws.onmessage = (ev) => {
+    let msg: any;
     try {
-      const msg = JSON.parse(ev.data);
-      if (msg.type === 'status') {
-        statusHandlers.forEach((h) => h(msg));
-      } else if (msg.type === 'stream') {
-        streamHandlers.forEach((h) => h(msg));
-      } else if (msg.type === 'console') {
-        consoleHandlers.forEach((h) => h(msg));
-      } else if (msg.type === 'control') {
-        controlHandlers.forEach((h) => h(msg));
-      }
+      msg = JSON.parse(ev.data);
     } catch {
-      // ignore
+      return;
+    }
+    if (msg.type === 'status') {
+      dispatch(statusHandlers, msg);
+    } else if (msg.type === 'stream') {
+      dispatch(streamHandlers, msg);
+    } else if (msg.type === 'console') {
+      dispatch(consoleHandlers, msg);
+    } else if (msg.type === 'control') {
+      dispatch(controlHandlers, msg);
     }
   };
 
   ws.onclose = () => {
-    if (reconnectTimer !== null) return;
-    reconnectTimer = window.setTimeout(() => {
-      reconnectTimer = null;
-      connect();
-    }, 1000);
+    // Tell subscribers the backend is gone so the UI can't show stale
+    // "connected" state forever.
+    if (wasOpen) {
+      wasOpen = false;
+      // No `devices` field: consumers keep their last device list (a backend
+      // blip must not wipe buffers/layout); they only flip connectivity.
+      dispatch(statusHandlers, { type: 'status', connected: false } as StatusMsg);
+    }
+    scheduleReconnect();
   };
 }
 
@@ -162,21 +225,52 @@ export function subscribeConsole(h: Handler<ConsoleMsg>) {
 
 export function sendConsole(cmd: string, deviceId?: string) {
   connect();
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({
+  const raw = JSON.stringify({
     type: 'console',
     cmd,
     ...(deviceId ? { device_id: deviceId } : {}),
-  }));
-  consoleHandlers.forEach((h) =>
-    h({ type: 'console', dir: 'tx', text: cmd, device_id: deviceId || null })
-  );
+  });
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    enqueueMessage(raw);
+  } else {
+    ws.send(raw);
+  }
+  dispatch(consoleHandlers, { type: 'console', dir: 'tx', text: cmd, device_id: deviceId || null });
 }
+
+// Only idempotent state-setters may be queued for replay after a reconnect.
+// Side-effecting commands (zeroing, recording, sweeps, GPIB) executed against
+// a freshly restarted backend at some arbitrary later moment would be wrong —
+// they fail fast instead.
+const REPLAY_SAFE_ACTIONS = new Set([
+  'set_active_device',
+  'stream',
+  'set_freq',
+  'set_os',
+  'set_wavelength',
+  'set_autogain',
+  'set_gain',
+  'serial_ports_list',
+]);
 
 export function sendControl(payload: Record<string, unknown>) {
   connect();
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
-  ws.send(JSON.stringify({ type: 'control', ...payload }));
+  const raw = JSON.stringify({ type: 'control', ...payload });
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    const action = String(payload.action || '');
+    if (REPLAY_SAFE_ACTIONS.has(action)) {
+      enqueueMessage(raw);
+    } else {
+      dispatch(controlHandlers, {
+        type: 'control',
+        action,
+        ok: false,
+        error: 'Backend not connected',
+      } as ControlMsg);
+    }
+    return;
+  }
+  ws.send(raw);
 }
 
 export function subscribeControl(h: Handler<ControlMsg>) {

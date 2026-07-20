@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import LiveChart from '@/components/LiveChart';
-import { DeviceStatus, gainDisplayLabel, sendControl, subscribeStream } from '@/coredaqClient';
+import { ControlMsg, DeviceStatus, gainDisplayLabel, sendControl, subscribeControl, subscribeStatus, subscribeStream } from '@/coredaqClient';
 import { VirtualChannelDef, VirtualMathType } from '@/virtualChannels';
 
 const CHANNEL_COLORS = [
@@ -15,6 +15,49 @@ const CHANNEL_COLORS = [
 ];
 
 const DISPLAY_POINTS_PER_SECOND = 500;
+const RECORD_STORAGE_KEY = 'coredaq.record.v1';
+const RECORD_MAX_S = 60;
+
+// Chart refreshes are decoupled from the 500 Hz sample stream: samples land in
+// plain ref-held buffers and the UI repaints at most this often.
+const CHART_TICK_MS = 33;
+// Each chart draws at most this many points; buffers are min/max-decimated per
+// repaint so peaks/dips survive (stride subsampling would erase them).
+const CHART_MAX_POINTS = 700;
+
+type XY = { x: number[]; y: number[] };
+
+function emptyXY(): XY {
+  return { x: [], y: [] };
+}
+
+/** Min/max envelope decimation onto [x,y] pairs (order-preserving per bucket). */
+function decimateMinMax(x: number[], y: number[], maxPoints: number): [number, number][] {
+  const n = Math.min(x.length, y.length);
+  if (n <= maxPoints) {
+    const out: [number, number][] = new Array(n);
+    for (let i = 0; i < n; i += 1) out[i] = [x[i], y[i]];
+    return out;
+  }
+  const buckets = Math.max(1, Math.floor(maxPoints / 2));
+  const step = n / buckets;
+  const out: [number, number][] = [];
+  for (let b = 0; b < buckets; b += 1) {
+    const i0 = Math.floor(b * step);
+    const i1 = Math.min(n, Math.max(i0 + 1, Math.floor((b + 1) * step)));
+    let minI = i0;
+    let maxI = i0;
+    for (let i = i0 + 1; i < i1; i += 1) {
+      if (y[i] < y[minI]) minI = i;
+      if (y[i] > y[maxI]) maxI = i;
+    }
+    const first = Math.min(minI, maxI);
+    const second = Math.max(minI, maxI);
+    out.push([x[first], y[first]]);
+    if (second !== first) out.push([x[second], y[second]]);
+  }
+  return out;
+}
 
 type ChannelDef = {
   id: string;
@@ -115,7 +158,12 @@ export default function LivePlot({
     );
   }, [sortedDevices]);
 
-  const [seriesByChannel, setSeriesByChannel] = useState<Record<string, ChannelSeries>>({});
+  // Sample buffers live OUTSIDE React state: appending 500 samples/s through
+  // setState churned new arrays per sample and re-rendered per message. The
+  // buffers are plain ref-held arrays; `chartTick` drives repaints at ~30 Hz.
+  const buffersRef = useRef<Record<string, XY>>({});
+  const streamDirtyRef = useRef(false);
+  const [chartTick, setChartTick] = useState(0);
   const [dragId, setDragId] = useState<string | null>(null);
   const [active, setActive] = useState<ChannelDef[]>([]);
   const [showAdd, setShowAdd] = useState(false);
@@ -139,13 +187,12 @@ export default function LivePlot({
       return kept;
     });
 
-    setSeriesByChannel((prev) => {
-      const next: Record<string, ChannelSeries> = {};
-      for (const p of physicalChannels) {
-        next[p.id] = prev[p.id] || emptySeries();
-      }
-      return next;
-    });
+    const buffers = buffersRef.current;
+    const next: Record<string, XY> = {};
+    for (const p of physicalChannels) {
+      next[p.id] = buffers[p.id] || emptyXY();
+    }
+    buffersRef.current = next;
 
     setSrcA((prev) => (prev && physIds.has(prev) ? prev : physicalChannels[0]?.id || ''));
     setSrcB((prev) => {
@@ -154,6 +201,16 @@ export default function LivePlot({
       return physicalChannels[0]?.id || '';
     });
   }, [physicalChannels]);
+
+  // Repaint clock: bump chartTick only when new samples arrived.
+  useEffect(() => {
+    const iv = window.setInterval(() => {
+      if (!streamDirtyRef.current) return;
+      streamDirtyRef.current = false;
+      setChartTick((t) => (t + 1) | 0);
+    }, CHART_TICK_MS);
+    return () => window.clearInterval(iv);
+  }, []);
 
   useEffect(() => {
     const virtualDefs: ChannelDef[] = virtualChannels.map((v) => ({
@@ -174,40 +231,40 @@ export default function LivePlot({
   }, [virtualChannels]);
 
   useEffect(() => {
+    // Backend sends batched samples: {device_id, t:[...], ch:[[...]x4]} every
+    // ~25 ms. Ingest appends into ref buffers in place — no React state churn.
     const unsub = subscribeStream((msg) => {
-      if (!msg.device_id || !Array.isArray(msg.ch) || msg.ch.length < 4) return;
-      if (typeof msg.ts !== 'number' || !Number.isFinite(msg.ts)) return;
+      if (!msg.device_id) return;
+      const batchT = Array.isArray(msg.t) ? (msg.t as number[]) : null;
+      const batchCh = Array.isArray(msg.ch) ? (msg.ch as number[][]) : null;
+      if (!batchT || !batchCh || batchCh.length < 4 || batchT.length === 0) return;
 
-      if (!t0Ref.current[msg.device_id]) {
-        t0Ref.current[msg.device_id] = msg.ts;
+      if (t0Ref.current[msg.device_id] === undefined) {
+        t0Ref.current[msg.device_id] = batchT[0];
       }
-      const relT = msg.ts - t0Ref.current[msg.device_id];
+      const t0 = t0Ref.current[msg.device_id];
+      const minT = batchT[batchT.length - 1] - t0 - Math.max(0.2, windowSeconds);
 
-      setSeriesByChannel((prev) => {
-        const next = { ...prev };
-        let touched = false;
-        for (let i = 0; i < 4; i += 1) {
-          const key = physicalChannelId(msg.device_id as string, i);
-          const oldSeries = prev[key] || emptySeries();
-          const nextX = [...oldSeries.x, relT];
-          const nextY = [...oldSeries.y, Number(msg.ch[i] ?? 0)];
-          const minT = relT - Math.max(0.2, windowSeconds);
-          let drop = 0;
-          while (drop < nextX.length && nextX[drop] < minT) drop += 1;
-          if (drop > 0) {
-            nextX.splice(0, drop);
-            nextY.splice(0, drop);
-          }
-          if (nextX.length > maxPoints) {
-            const extra = nextX.length - maxPoints;
-            nextX.splice(0, extra);
-            nextY.splice(0, extra);
-          }
-          next[key] = { x: nextX, y: nextY };
-          touched = true;
+      for (let i = 0; i < 4; i += 1) {
+        const key = physicalChannelId(msg.device_id as string, i);
+        const buf = buffersRef.current[key];
+        if (!buf) continue;
+        const chArr = batchCh[i];
+        if (!Array.isArray(chArr)) continue;
+        const m = Math.min(batchT.length, chArr.length);
+        for (let k = 0; k < m; k += 1) {
+          buf.x.push(batchT[k] - t0);
+          buf.y.push(Number(chArr[k] ?? 0));
         }
-        return touched ? next : prev;
-      });
+        let drop = 0;
+        while (drop < buf.x.length && buf.x[drop] < minT) drop += 1;
+        if (buf.x.length - drop > maxPoints) drop = buf.x.length - maxPoints;
+        if (drop > 0) {
+          buf.x.splice(0, drop);
+          buf.y.splice(0, drop);
+        }
+      }
+      streamDirtyRef.current = true;
     });
     return () => unsub();
   }, [maxPoints, windowSeconds]);
@@ -241,18 +298,182 @@ export default function LivePlot({
         ? 1100
         : 1700;
   const [wavelengthInput, setWavelengthInput] = useState('');
+  const [wavelengthEditing, setWavelengthEditing] = useState(false);
+  const [wavelengthError, setWavelengthError] = useState<string | null>(null);
+  // Value submitted to the device and awaiting confirmation, plus the time it
+  // was sent. While a submit is pending we do NOT snap the field back to the
+  // (stale) device value; the staleness fallback below guarantees the field can
+  // never stay frozen even if a control ack is lost.
+  const wavelengthPendingRef = useRef<{ value: number; ts: number } | null>(null);
+  const WAVELENGTH_PENDING_TIMEOUT_MS = 4000;
+
+  // Refs so the (mount-once) control subscriber always sees current context.
+  const activeDeviceIdRef = useRef<string | null>(null);
+  const wavelengthNmRef = useRef<number | null>(null);
+  activeDeviceIdRef.current = activeDevice?.device_id ?? null;
+  wavelengthNmRef.current = wavelengthNm;
+
+  // Resync the field from device status — but never clobber active typing or an
+  // in-flight submit (until it confirms, clamps, or goes stale).
+  useEffect(() => {
+    if (wavelengthEditing) return;
+    const pending = wavelengthPendingRef.current;
+    if (pending) {
+      const confirmed =
+        typeof wavelengthNm === 'number' && Math.abs(wavelengthNm - pending.value) < 0.5;
+      const stale = Date.now() - pending.ts > WAVELENGTH_PENDING_TIMEOUT_MS;
+      if (!confirmed && !stale) return; // keep showing the submitted value
+      wavelengthPendingRef.current = null;
+    }
+    setWavelengthInput(formatWavelengthInput(wavelengthNm));
+  }, [activeDevice?.device_id, wavelengthNm, wavelengthEditing]);
+
+  // Reset transient input state when the active device changes.
+  useEffect(() => {
+    setWavelengthEditing(false);
+    setWavelengthError(null);
+    wavelengthPendingRef.current = null;
+  }, [activeDevice?.device_id]);
+
+  // Handle the backend's set_wavelength acknowledgement (fixes silent failures
+  // that previously required an app restart to recover from).
+  useEffect(() => {
+    return subscribeControl((msg: ControlMsg) => {
+      if (msg.action !== 'set_wavelength') return;
+      const forDevice = (msg.device_id as string | undefined) ?? null;
+      if (forDevice && activeDeviceIdRef.current && forDevice !== activeDeviceIdRef.current) return;
+      wavelengthPendingRef.current = null;
+      if (msg.ok) {
+        setWavelengthError(null);
+        const applied = msg.wavelength_nm as number | undefined;
+        if (typeof applied === 'number' && Number.isFinite(applied)) {
+          setWavelengthInput(formatWavelengthInput(applied));
+        }
+      } else {
+        setWavelengthError(String(msg.error || 'Failed to set wavelength'));
+        setWavelengthInput(formatWavelengthInput(wavelengthNmRef.current));
+      }
+    });
+  }, []);
+
+  // ---- live recording (Record button) -----------------------------------
+  const [recDurationS, setRecDurationS] = useState<number>(() => {
+    try {
+      const raw = window.localStorage.getItem(RECORD_STORAGE_KEY);
+      const v = raw ? Number(JSON.parse(raw).durationS) : NaN;
+      return Number.isFinite(v) && v >= 1 && v <= RECORD_MAX_S ? v : 10;
+    } catch {
+      return 10;
+    }
+  });
+  const [recording, setRecording] = useState(false);
+  const [recRemaining, setRecRemaining] = useState(0);
+  const [recNote, setRecNote] = useState<string | null>(null);
 
   useEffect(() => {
-    setWavelengthInput(formatWavelengthInput(wavelengthNm));
-  }, [activeDevice?.device_id, wavelengthNm]);
+    try {
+      window.localStorage.setItem(RECORD_STORAGE_KEY, JSON.stringify({ durationS: recDurationS }));
+    } catch {
+      // ignore
+    }
+  }, [recDurationS]);
+
+  useEffect(() => {
+    if (!recording) return;
+    const iv = window.setInterval(() => setRecRemaining((p) => Math.max(0, p - 1)), 1000);
+    return () => window.clearInterval(iv);
+  }, [recording]);
+
+  const recordingRef = useRef(false);
+  recordingRef.current = recording;
+
+  useEffect(() => {
+    return subscribeControl((msg: ControlMsg) => {
+      if (msg.action === 'record_start' && !msg.ok) {
+        setRecording(false);
+        setRecNote(`Record failed: ${msg.error || 'unknown error'}`);
+      } else if (msg.action === 'record_stop' && !msg.ok) {
+        // e.g. "No recording in progress" after a backend restart — always
+        // unlock the UI rather than wedging in the recording state.
+        setRecording(false);
+        setRecNote(`Record stopped: ${msg.error || 'unknown error'}`);
+      } else if (msg.action === 'record_done') {
+        setRecording(false);
+        setRecNote(
+          msg.ok
+            ? `Saved ${msg.frames ?? '?'} frames → ${msg.path ?? ''}`
+            : `Record failed: ${msg.error || 'unknown error'}`
+        );
+      }
+    });
+  }, []);
+
+  // Backend loss mid-record: record_done will never arrive — abort the UI
+  // state (the backend finalizes a partial file on SIGTERM when it can).
+  useEffect(() => {
+    return subscribeStatus((msg) => {
+      if (msg.connected === false && recordingRef.current) {
+        setRecording(false);
+        setRecNote('Backend disconnected — recording aborted; a partial file may exist.');
+      }
+    });
+  }, []);
+
+  const startRecording = async () => {
+    if (recording) return;
+    const cards = active.map((def) =>
+      def.type === 'physical'
+        ? {
+            kind: 'physical',
+            name: def.name,
+            device_id: def.deviceId,
+            channel: def.channelIndex,
+          }
+        : {
+            kind: 'math',
+            name: def.name,
+            math_type: def.mathType,
+            src_a: def.srcA,
+            src_b: def.srcB,
+          }
+    );
+    if (cards.length === 0) {
+      setRecNote('No open cards to record.');
+      return;
+    }
+    const d = Math.min(RECORD_MAX_S, Math.max(1, Math.round(recDurationS)));
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const defaultName = `coredaq_live_${stamp}.h5`;
+    let path = defaultName;
+    if (window.coredaq?.pickSavePath) {
+      const picked = await window.coredaq.pickSavePath(defaultName);
+      if (picked.canceled || !picked.filePath) return;
+      path = picked.filePath;
+    }
+    setRecNote(null);
+    setRecording(true);
+    setRecRemaining(d);
+    sendControl({ action: 'record_start', path, duration_s: d, cards });
+  };
 
   const applyWavelength = () => {
+    setWavelengthEditing(false);
     if (!activeDevice) return;
     const parsed = Number(wavelengthInput);
     if (!Number.isFinite(parsed) || parsed <= 0) {
       setWavelengthInput(formatWavelengthInput(wavelengthNm));
+      wavelengthPendingRef.current = null;
       return;
     }
+    // No-op if unchanged from the device value — avoids needless commands.
+    if (typeof wavelengthNm === 'number' && Math.abs(parsed - wavelengthNm) < 0.01) {
+      wavelengthPendingRef.current = null;
+      setWavelengthError(null);
+      setWavelengthInput(formatWavelengthInput(wavelengthNm));
+      return;
+    }
+    wavelengthPendingRef.current = { value: parsed, ts: Date.now() };
+    setWavelengthError(null);
     sendControl({
       action: 'set_wavelength',
       device_id: activeDevice.device_id,
@@ -266,21 +487,24 @@ export default function LivePlot({
   };
 
   const computeMath = (def: ChannelDef): ChannelSeries => {
-    const a = def.srcA ? seriesByChannel[def.srcA] : undefined;
-    const b = def.srcB ? seriesByChannel[def.srcB] : undefined;
+    const a = def.srcA ? buffersRef.current[def.srcA] : undefined;
+    const b = def.srcB ? buffersRef.current[def.srcB] : undefined;
     if (!a || !b) return emptySeries();
 
     const len = Math.min(a.y.length, b.y.length);
     if (len <= 0) return emptySeries();
 
-    const aY = a.y.slice(-len);
-    const bY = b.y.slice(-len);
-    const xBase = (a.x.length <= b.x.length ? a.x : b.x).slice(-len);
+    const aOff = a.y.length - len;
+    const bOff = b.y.length - len;
+    const xSrc = a.x.length <= b.x.length ? a : b;
+    const xOff = xSrc.x.length - len;
+    const xBase = new Array(len);
     const out = new Array(len);
 
     for (let i = 0; i < len; i += 1) {
-      const va = aY[i];
-      const vb = bY[i];
+      xBase[i] = xSrc.x[xOff + i];
+      const va = a.y[aOff + i];
+      const vb = b.y[bOff + i];
       switch (def.mathType) {
         case 'sum':
           out[i] = va + vb;
@@ -302,40 +526,33 @@ export default function LivePlot({
     return { x: xBase, y: out };
   };
 
-  const activeSeries = useMemo(() => {
-    return active.map((def) => {
-      if (def.type === 'physical') {
-        const base = seriesByChannel[def.id] || emptySeries();
-        return { ...def, x: base.x, y: base.y };
-      }
-      const math = computeMath(def);
-      return { ...def, x: math.x, y: math.y };
-    });
-  }, [active, seriesByChannel]);
-
+  // Recomputed on the ~30 Hz chart tick (not per sample). Output is already
+  // decimated to what the chart will actually draw.
   const displaySeries = useMemo(() => {
-    return activeSeries.map((def) => {
+    void chartTick; // buffers are refs; the tick is the invalidation signal
+    return active.map((def) => {
+      const base =
+        def.type === 'physical'
+          ? buffersRef.current[def.id] || emptySeries()
+          : computeMath(def);
+      const latest = base.y.length > 0 ? base.y[base.y.length - 1] : null;
       if (def.type === 'math' && def.mathType === 'db') {
-        return { ...def, unit: 'dB', displayY: def.y };
+        return { ...def, unit: 'dB', latest, points: decimateMinMax(base.x, base.y, CHART_MAX_POINTS) };
       }
-      const scale = pickPowerScale(def.y);
-      return {
-        ...def,
-        unit: scale.unit,
-        displayY: def.y.map((v) => v * scale.factor),
-      };
+      const scale = pickPowerScale(base.y);
+      const pts = decimateMinMax(base.x, base.y, CHART_MAX_POINTS);
+      for (let i = 0; i < pts.length; i += 1) pts[i][1] *= scale.factor;
+      return { ...def, unit: scale.unit, latest, points: pts };
     });
-  }, [activeSeries]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, chartTick]);
 
   const clearSeries = () => {
     t0Ref.current = {};
-    setSeriesByChannel((prev) => {
-      const next: Record<string, ChannelSeries> = {};
-      for (const key of Object.keys(prev)) {
-        next[key] = emptySeries();
-      }
-      return next;
-    });
+    for (const key of Object.keys(buffersRef.current)) {
+      buffersRef.current[key] = emptyXY();
+    }
+    streamDirtyRef.current = true;
   };
 
   const removeChannel = (id: string) => {
@@ -411,6 +628,41 @@ export default function LivePlot({
           <button className="btn ghost" onClick={() => setShowAdd(true)}>
             Add Channel
           </button>
+          <div className="record-controls" title="Record the open cards to an HDF5 file (500 Hz, max 60 s)">
+            <input
+              className="pref-input record-duration"
+              type="number"
+              min={1}
+              max={RECORD_MAX_S}
+              step={1}
+              value={recDurationS}
+              disabled={recording}
+              onChange={(e) => {
+                const v = Number(e.target.value);
+                if (Number.isFinite(v)) setRecDurationS(v);
+              }}
+              onBlur={() =>
+                setRecDurationS((p) => Math.min(RECORD_MAX_S, Math.max(1, Math.round(p) || 10)))
+              }
+            />
+            <span className="record-unit">s</span>
+            {!recording ? (
+              <button
+                className="btn record-btn"
+                onClick={startRecording}
+                disabled={sortedDevices.length === 0}
+              >
+                ● Record
+              </button>
+            ) : (
+              <button
+                className="btn record-btn recording"
+                onClick={() => sendControl({ action: 'record_stop' })}
+              >
+                ■ Stop ({recRemaining}s)
+              </button>
+            )}
+          </div>
           <button className="btn ghost" onClick={() => sendControl({ action: 'stream', enabled: false })}>
             Freeze
           </button>
@@ -425,6 +677,8 @@ export default function LivePlot({
           </button>
         </div>
       </div>
+
+      {recNote && <div className="record-note">{recNote}</div>}
 
       <div className="live-grid">
         <div className="panel chart-panel">
@@ -467,8 +721,7 @@ export default function LivePlot({
                   </button>
                 </div>
                 <LiveChart
-                  x={ch.x}
-                  series={[{ name: ch.name, color: ch.color, data: ch.displayY }]}
+                  series={[{ name: ch.name, color: ch.color, points: ch.points }]}
                   unit={ch.unit}
                   compact
                 />
@@ -589,6 +842,7 @@ export default function LivePlot({
                   max={wavelengthMaxNm}
                   value={wavelengthInput}
                   onChange={(e) => setWavelengthInput(e.target.value)}
+                  onFocus={() => setWavelengthEditing(true)}
                   onBlur={applyWavelength}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
@@ -601,11 +855,15 @@ export default function LivePlot({
                 <span className="stat-unit">nm</span>
               </div>
             </div>
-            <div className="stat-hint">
-              Range {Math.round(wavelengthMinNm)}-{Math.round(wavelengthMaxNm)} nm
-              {' • '}
-              default 1550 nm
-            </div>
+            {wavelengthError ? (
+              <div className="stat-hint stat-hint-error">{wavelengthError}</div>
+            ) : (
+              <div className="stat-hint">
+                Range {Math.round(wavelengthMinNm)}-{Math.round(wavelengthMaxNm)} nm
+                {' • '}
+                default 1550 nm
+              </div>
+            )}
           </div>
 
           <div className="divider" />

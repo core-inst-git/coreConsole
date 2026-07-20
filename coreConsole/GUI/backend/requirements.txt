@@ -1,0 +1,9 @@
+# coreConsole Python backend (coredaq_service.py) runtime dependencies.
+# Installed into the dev environment and bundled into the packaged app (Phase 3).
+py_coreDAQ>=1.2.1     # coreDAQ device driver + calibration/unit math (single source of truth)
+websockets>=12        # asyncio WebSocket server on ws://127.0.0.1:8765
+numpy>=1.21           # pulled in by py_coreDAQ; used for capture/sweep arrays
+# --- Phase 2 (GPIB / laser sweeps + HDF5 save) ---
+pyvisa>=1.13          # GPIB / generic VISA instruments (needs NI-VISA installed on host)
+pyftdi>=0.55          # Santec FTDI-direct USB laser path (VISA-free)
+h5py>=3.8             # sweep HDF5 export (replaces the Node execFile shell-out)
