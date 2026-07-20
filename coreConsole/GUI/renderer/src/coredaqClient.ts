@@ -42,6 +42,7 @@ export type DeviceStatus = {
 export type StatusMsg = {
   type: 'status';
   connected: boolean;
+  port_override?: string | null;
   device_count?: number;
   devices?: DeviceStatus[];
   active_device_id?: string | null;
@@ -244,6 +245,7 @@ export function sendConsole(cmd: string, deviceId?: string) {
 // they fail fast instead.
 const REPLAY_SAFE_ACTIONS = new Set([
   'set_active_device',
+  'set_port_override',
   'stream',
   'set_freq',
   'set_os',

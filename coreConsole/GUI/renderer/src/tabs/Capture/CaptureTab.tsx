@@ -149,7 +149,7 @@ function maxOsForFreq(freqHz: number): number {
 function userFacingSweepError(raw: string): string {
   const t = (raw || '').toLowerCase();
   if (t.includes('no gpib resource selected') || t.includes('no gpib resource provided')) {
-    return 'No laser resource selected. Click Scan VISA, select a resource, then run sweep.';
+    return 'No laser resource selected. Click Scan Lasers (or Add Laser), select a resource, then run sweep.';
   }
   if (t.includes('not found or not responding on visa resource')) {
     return raw;
@@ -611,16 +611,16 @@ export default function CaptureTab({
       return;
     }
     if (!selectedResource) {
-      warnUser('No laser resource selected. Click Scan VISA, select a resource, then run sweep.');
+      warnUser('No laser resource selected. Click Scan Lasers (or Add Laser), select a resource, then run sweep.');
       return;
     }
     if (resources.length === 0) {
-      warnUser('No scanned laser resources. Click Scan VISA first, then select a resource.');
+      warnUser('No lasers found. Click Scan Lasers or Add Laser first.');
       return;
     }
     const selectedRow = resources.find((r) => r.resource === selectedResource) || null;
     if (!selectedRow) {
-      warnUser('Selected laser resource is not currently visible. Run Scan VISA and select a valid resource.');
+      warnUser('Selected laser is not currently visible. Run Scan Lasers and select a valid resource.');
       return;
     }
     if (!selectedRow.idn || String(selectedRow.idn).trim().length === 0) {
@@ -880,7 +880,7 @@ export default function CaptureTab({
 
             <div className="capture-toolbar">
               <button className="btn ghost" onClick={doScan} disabled={scanningVisa}>
-                {scanningVisa ? 'Scanning...' : 'Scan VISA'}
+                {scanningVisa ? 'Scanning...' : 'Scan Lasers'}
               </button>
               <button
                 className="btn ghost"

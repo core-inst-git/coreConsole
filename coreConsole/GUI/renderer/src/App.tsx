@@ -3,7 +3,7 @@ import LivePlot from './tabs/LivePlot/LivePlot';
 import ConsoleTab from './tabs/Console/ConsoleTab';
 import CalibrationTab from './tabs/Calibration/CalibrationTab';
 import CaptureTab from './tabs/Capture/CaptureTab';
-import { DeviceStatus, sendControl, subscribeStatus } from './coredaqClient';
+import { ControlMsg, DeviceStatus, sendControl, subscribeControl, subscribeStatus } from './coredaqClient';
 import { VirtualChannelDef, VirtualMathType } from './virtualChannels';
 
 const tabs = [
@@ -80,6 +80,28 @@ export default function App() {
     return () => window.clearTimeout(t);
   }, [activeTab]);
   const [showPrefs, setShowPrefs] = useState(false);
+
+  // Manual serial-port control (autodiscovery override)
+  const [serialPorts, setSerialPorts] = useState<
+    { device: string; description: string; connected: boolean; is_coredaq_candidate: boolean }[]
+  >([]);
+  const [portOverride, setPortOverride] = useState<string | null>(null);
+
+  useEffect(() => {
+    sendControl({ action: 'serial_ports_list' });
+    const unsub = subscribeControl((msg: ControlMsg) => {
+      if (msg.action === 'serial_ports_list' && msg.ok && Array.isArray(msg.ports)) {
+        setSerialPorts(msg.ports as typeof serialPorts);
+        if (typeof msg.port_override === 'string' || msg.port_override === null) {
+          setPortOverride((msg.port_override as string | null) ?? null);
+        }
+      } else if (msg.action === 'set_port_override' && msg.ok) {
+        setPortOverride((msg.port_override as string | null) ?? null);
+      }
+    });
+    return unsub;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [windowSeconds, setWindowSeconds] = useState(5);
   const [maximized, setMaximized] = useState<boolean>(false);
   const [devices, setDevices] = useState<DeviceStatus[]>([]);
@@ -131,6 +153,11 @@ export default function App() {
         return;
       }
       setBackendUp(true);
+      if (typeof (s as Record<string, unknown>).port_override === 'string') {
+        setPortOverride((s as Record<string, unknown>).port_override as string);
+      } else if ((s as Record<string, unknown>).port_override === null) {
+        setPortOverride(null);
+      }
       const rows = s.devices;
       const unsupported = rows.find((r) => r?.unsupported_firmware);
       if (unsupported?.unsupported_firmware) {
@@ -321,6 +348,34 @@ export default function App() {
                 </div>
               );
             })}
+
+            <div className="port-select-row">
+              <span className="device-manager-head">Port</span>
+              <select
+                className="pref-input port-select"
+                value={portOverride ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  sendControl({ action: 'set_port_override', port: v || null });
+                }}
+                title="Pin the coreDAQ to a specific serial port (Auto = discover)"
+              >
+                <option value="">Auto (discover)</option>
+                {serialPorts.map((p) => (
+                  <option key={p.device} value={p.device}>
+                    {p.device}
+                    {p.is_coredaq_candidate ? ' ●' : ''}
+                  </option>
+                ))}
+              </select>
+              <button
+                className="icon-btn"
+                title="Refresh port list"
+                onClick={() => sendControl({ action: 'serial_ports_list' })}
+              >
+                ↻
+              </button>
+            </div>
           </div>
 
           <div className="sidebar-footer">

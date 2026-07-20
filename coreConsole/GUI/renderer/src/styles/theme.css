@@ -1328,3 +1328,17 @@ h3,
     grid-template-columns: 1fr;
   }
 }
+
+/* Manual serial-port control in the Device Manager */
+.port-select-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.port-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+}

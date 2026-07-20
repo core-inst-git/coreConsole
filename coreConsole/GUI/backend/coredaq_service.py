@@ -179,6 +179,7 @@ class Session:
         self.stream_error_streak = 0
         self.status_poll_error_streak = 0
         self.last_status_poll_ts = 0.0
+        self.last_sensor_poll_ts = 0.0
         # Batched live-stream samples awaiting the next flush.
         self.pending_t: list[float] = []
         self.pending_ch: list[list[float]] = [[], [], [], []]
@@ -199,6 +200,7 @@ class CoreDAQBackend:
         self.devices: dict[str, Session] = {}
         self.port_to_device: dict[str, str] = {}
         self.unsupported_ports: dict[str, dict] = {}
+        self.ignored_ports: set[str] = set()  # manually disconnected
         self.active_device_id: Optional[str] = None
         self.last_discovery_ts = 0.0
         self.discovery_in_flight = False
@@ -393,7 +395,7 @@ class CoreDAQBackend:
                     self.unsupported_ports.pop(port, None)
 
             for port in candidate_ports:
-                if port in self.port_to_device:
+                if port in self.port_to_device or port in self.ignored_ports:
                     continue
                 result = await asyncio.to_thread(self._open_and_setup_sync, port)
                 if result is None:
@@ -460,6 +462,13 @@ class CoreDAQBackend:
             if not s.detector_type:
                 s.detector_type = detect_detector_type_from_idn(s.idn)
 
+        # Environmental sensors are slow, non-critical queries; while streaming
+        # refresh them on a much longer cadence.
+        streaming = self.stream_enabled_global and s.stream_enabled
+        if streaming and (now_sec() - getattr(s, "last_sensor_poll_ts", 0.0)) < 10.0:
+            return True
+        s.last_sensor_poll_ts = now_sec()
+
         try:
             s.wavelength_nm = float(s.dev.wavelength_nm())
         except Exception:
@@ -495,13 +504,20 @@ class CoreDAQBackend:
             return True
         now = now_sec()
         is_streaming = self.stream_enabled_global and s.stream_enabled
-        min_poll = 2.0 if is_streaming else 0.5
+        # While streaming, the 500 Hz sample traffic saturates the serial link;
+        # keep status polls rare so they don't fight it (and don't lie about
+        # the device being gone when it is demonstrably alive).
+        min_poll = 5.0 if is_streaming else 0.5
         if (now - s.last_status_poll_ts) < min_poll:
             return True
         ok = await asyncio.to_thread(self._poll_session_status_sync, s)
         if not ok:
-            # One transient serial hiccup must not drop a live session; only
-            # repeated failures mean the device is really gone.
+            if is_streaming and s.stream_error_streak == 0:
+                # Stream reads are succeeding, so the device is alive — the
+                # poll just lost the race for the transport. Never drop here.
+                s.status_poll_error_streak = 0
+                s.last_status_poll_ts = now
+                return True
             s.status_poll_error_streak += 1
             if s.status_poll_error_streak >= 3:
                 await self._drop_session(s.device_id)
@@ -583,6 +599,7 @@ class CoreDAQBackend:
                     "type": "status",
                     "connected": len(self.devices) > 0,
                     "device_count": len(self.devices),
+                    "port_override": self.port_override,
                     "devices": device_rows,
                     "active_device_id": self.active_device_id,
                     "port": active.port if active else None,
@@ -707,9 +724,11 @@ class CoreDAQBackend:
         if delay > 0:
             await asyncio.sleep(delay)
         else:
-            # Fell behind (slow device round trip) — don't accumulate debt.
+            # Fell behind (real-hardware round trips are slower than 2 ms).
+            # Don't accumulate debt, and leave ~1 ms of link headroom per
+            # iteration so status polls and user commands are never starved.
             self._stream_next_tick = now_sec()
-            await asyncio.sleep(0)
+            await asyncio.sleep(LIVE_STREAM_PERIOD_S / 2)
 
     # ---- message handling ------------------------------------------------
     async def _handle_console(self, ws: Any, data: dict) -> None:
@@ -850,6 +869,84 @@ class CoreDAQBackend:
                 await ws.send(json.dumps({
                     "type": "control", "action": action, "ok": True, "error": None,
                     "device_id": sess.device_id, "zeros": codes, "gains": gains,
+                }))
+                return
+
+            # ---- serial port control (manual override of autodiscovery) --
+            if action == "serial_ports_list":
+                def _list_ports() -> list[dict]:
+                    from serial.tools import list_ports
+                    rows = []
+                    for p in list_ports.comports():
+                        rows.append({
+                            "device": p.device,
+                            "description": p.description or "",
+                            "connected": p.device in self.port_to_device,
+                            "is_coredaq_candidate": bool(
+                                (p.vid == 0x0483 and p.pid == 0x5740)
+                                or "coredaq" in (p.description or "").lower()),
+                        })
+                    return rows
+                ports = await asyncio.to_thread(_list_ports)
+                await ws.send(json.dumps({
+                    "type": "control", "action": action, "ok": True, "error": None,
+                    "ports": ports, "port_override": self.port_override,
+                }))
+                return
+
+            if action == "set_port_override":
+                port = str(data.get("port") or "").strip() or None
+                self.port_override = port
+                self.ignored_ports.discard(port) if port else None
+                if port is None:
+                    self.ignored_ports.clear()
+                # Force a discovery pass right away so the switch feels instant.
+                self.last_discovery_ts = 0.0
+                await ws.send(json.dumps({
+                    "type": "control", "action": action, "ok": True, "error": None,
+                    "port_override": self.port_override,
+                }))
+                return
+
+            if action == "connect_port":
+                port = str(data.get("port") or "").strip()
+                if not port:
+                    raise coreDAQError("No port provided")
+                self.ignored_ports.discard(port)
+                if port in self.port_to_device:
+                    await ws.send(json.dumps({
+                        "type": "control", "action": action, "ok": True, "error": None,
+                        "device_id": self.port_to_device[port], "port": port,
+                    }))
+                    return
+                result = await asyncio.to_thread(self._open_and_setup_sync, port)
+                if result is None:
+                    raise coreDAQError(f"No coreDAQ responding on {port}")
+                if isinstance(result, tuple) and result[0] == "unsupported":
+                    self.unsupported_ports[port] = result[1]
+                    raise coreDAQError(
+                        str(result[1].get("unsupported_reason") or "Unsupported firmware"))
+                sess_new: Session = result
+                sess_new.device_id = self._make_unique_device_id(sess_new.device_id)
+                self.devices[sess_new.device_id] = sess_new
+                self.port_to_device[port] = sess_new.device_id
+                if not self.active_device_id:
+                    self.active_device_id = sess_new.device_id
+                await ws.send(json.dumps({
+                    "type": "control", "action": action, "ok": True, "error": None,
+                    "device_id": sess_new.device_id, "port": port,
+                }))
+                return
+
+            if action == "disconnect_port":
+                did = str(data.get("device_id") or "").strip()
+                sess_d = self._get_session(did or None)
+                # Remember the port so autodiscovery doesn't instantly re-add it.
+                self.ignored_ports.add(sess_d.port)
+                await self._drop_session(sess_d.device_id)
+                await ws.send(json.dumps({
+                    "type": "control", "action": action, "ok": True, "error": None,
+                    "device_id": sess_d.device_id,
                 }))
                 return
 
@@ -1062,16 +1159,25 @@ class CoreDAQBackend:
         except Exception as err:
             debug.append(f"VISA unavailable: {err}")
 
-        for sn in FtdiTransport.list_devices():
-            res = f"ftdi://SANTEC:{sn}"
-            if res in seen or time.monotonic() > deadline:
-                continue
-            try:
-                row = probe_resource(res, timeout_s=2.0)
-                rows.append(row)
-                seen.add(res)
-            except LaserError as err:
-                debug.append(f"{res}: {err}")
+        try:
+            import usb.core  # noqa: F401  (pyftdi's backend)
+            ftdi_sns = FtdiTransport.list_devices()
+            if not ftdi_sns:
+                debug.append("FTDI: no devices found (Santec USB lasers appear "
+                             "here when connected)")
+            for sn in ftdi_sns:
+                res = f"ftdi://SANTEC:{sn}"
+                if res in seen or time.monotonic() > deadline:
+                    continue
+                try:
+                    row = probe_resource(res, timeout_s=2.0)
+                    rows.append(row)
+                    seen.add(res)
+                except LaserError as err:
+                    debug.append(f"{res}: {err}")
+        except ImportError:
+            debug.append("FTDI scan unavailable: pyusb/libusb missing "
+                         "(mac: brew install libusb; win: Zadig WinUSB driver)")
         return rows, debug
 
     async def _run_real_sweep(self, ws: Any, sess: Session, data: dict) -> None:
