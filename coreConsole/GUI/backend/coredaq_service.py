@@ -1169,9 +1169,11 @@ class CoreDAQBackend:
         debug: list[str] = []
         deadline = time.monotonic() + max(1.0, timeout_s)
 
+        gpib_errors: dict[str, list[str]] = {}
         try:
             import pyvisa
             rm = pyvisa.ResourceManager()
+            debug.append(f"VISA backend: {rm}")
             for res in rm.list_resources():
                 if time.monotonic() > deadline:
                     debug.append("VISA scan hit timeout; partial results")
@@ -1183,11 +1185,19 @@ class CoreDAQBackend:
                     rows.append(row)
                     seen.add(res)
                 except LaserError as err:
-                    debug.append(f"{res}: {err}")
+                    # NI/Keysight VISA blind-lists every GPIB address, so a
+                    # dead bus yields 31 identical failures — collapse them.
+                    gpib_errors.setdefault(str(err).split(":", 1)[-1].strip(), []).append(res)
         except LaserError as err:
             debug.append(str(err))
         except Exception as err:
             debug.append(f"VISA unavailable: {err}")
+        for msg, ress in gpib_errors.items():
+            if len(ress) > 2:
+                debug.append(f"{len(ress)} GPIB addresses failed identically: {msg}")
+            else:
+                for res in ress:
+                    debug.append(f"{res}: {msg}")
 
         try:
             import usb.core  # noqa: F401  (pyftdi's backend)

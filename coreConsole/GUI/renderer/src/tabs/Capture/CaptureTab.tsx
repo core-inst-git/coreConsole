@@ -1199,7 +1199,7 @@ export default function CaptureTab({
                     : laserIface === 'visa'
                       ? 'VISA resource (e.g. GPIB0::10::INSTR)'
                       : laserIface === 'ftdi'
-                        ? 'FTDI serial number'
+                        ? 'FTDI serial number, or COM port (Windows VCP, e.g. COM10)'
                         : 'Serial port (e.g. /dev/tty.usbserial-A1B2 or COM3)'}
                 </label>
                 <input

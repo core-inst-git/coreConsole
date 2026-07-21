@@ -124,11 +124,15 @@ class VisaTransport(LaserTransport):
             raise LaserError("pyvisa is not installed in the backend") from err
         try:
             rm = pyvisa.ResourceManager()
+        except Exception as err:
+            raise LaserError(
+                f"No VISA library available: {err}. "
+                "Install NI-VISA (and NI-488.2 for GPIB), then retry.") from err
+        try:
             self._inst = rm.open_resource(resource)
         except Exception as err:
             raise LaserError(
-                f"Cannot open VISA resource {resource}: {err}. "
-                "Install NI-VISA (and NI-488.2 for GPIB), then retry.") from err
+                f"Cannot open VISA resource {resource}: {err}") from err
         self._inst.timeout = timeout_ms
         self._inst.write_termination = "\n"
         self._inst.read_termination = "\n"
@@ -171,16 +175,31 @@ class FtdiTransport(LaserTransport):
     """
 
     def __init__(self, serial_number: str, timeout_s: float = 2.0) -> None:
+        target = str(serial_number).strip()
+        # Windows VCP mode: the Santec's FTDI chip is usually bound to the
+        # serial-port driver, so the laser appears as COMxx (pyftdi cannot
+        # claim it without a driver swap). Same 9600-baud CR framing either way.
+        if re.fullmatch(r"COM\d+", target, re.IGNORECASE) or target.startswith("/dev/"):
+            try:
+                import serial
+            except ImportError as err:
+                raise LaserError("pyserial is not installed") from err
+            try:
+                self._port = serial.Serial(target, baudrate=9600, timeout=timeout_s)
+            except Exception as err:
+                raise LaserError(
+                    f"Cannot open Santec laser on serial port {target}: {err}") from err
+            return
         try:
             from pyftdi.serialext import serial_for_url
         except ImportError as err:
             raise LaserError("pyftdi is not installed in the backend") from err
-        url = f"ftdi://::{serial_number}/1"
+        url = f"ftdi://::{target}/1"
         try:
             self._port = serial_for_url(url, baudrate=9600, timeout=timeout_s)
         except Exception as err:
             raise LaserError(
-                f"Cannot open Santec FTDI device {serial_number!r}: {err}") from err
+                f"Cannot open Santec FTDI device {target!r}: {err}") from err
 
     def write(self, cmd: str) -> None:
         try:
@@ -298,6 +317,8 @@ class MockTransport(LaserTransport):
 def open_transport(resource: str, timeout_s: float = 5.0) -> LaserTransport:
     """Open a transport from a resource URI (see module docstring)."""
     r = str(resource or "").strip()
+    # Explicit URI schemes take priority; the bare-VISA heuristic must come
+    # LAST or any resource containing '::' gets hijacked to VISA.
     if r.startswith("tcp://"):
         rest = r[len("tcp://"):]
         host, _, port_s = rest.partition(":")
@@ -306,14 +327,14 @@ def open_transport(resource: str, timeout_s: float = 5.0) -> LaserTransport:
         return TcpScpiTransport(host, int(port_s) if port_s else 5025, timeout_s)
     if r.startswith("visa://"):
         return VisaTransport(r[len("visa://"):])
-    # Legacy bare VISA strings (GPIB0::10::INSTR) from live VISA scans.
-    if "::" in r and not r.upper().startswith("SIM::"):
-        return VisaTransport(r)
     if r.startswith("ftdi://SANTEC:") or r.startswith("FTDI:SANTEC:"):
         sn = r.split("SANTEC:", 1)[1].strip("/")
         return FtdiTransport(sn)
     if r.startswith("serial://"):
         return SerialCmdTransport(r[len("serial://"):])
+    # Legacy bare VISA strings (GPIB0::10::INSTR) from live VISA scans.
+    if "::" in r and not r.upper().startswith("SIM::"):
+        return VisaTransport(r)
     raise LaserError(f"Unrecognized laser resource: {resource!r}")
 
 
