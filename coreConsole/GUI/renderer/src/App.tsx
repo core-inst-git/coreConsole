@@ -5,6 +5,7 @@ import CalibrationTab from './tabs/Calibration/CalibrationTab';
 import CaptureTab from './tabs/Capture/CaptureTab';
 import { ControlMsg, DeviceStatus, sendControl, subscribeControl, subscribeStatus } from './coredaqClient';
 import { VirtualChannelDef, VirtualMathType } from './virtualChannels';
+import { PowerUnit, loadPowerUnit, savePowerUnit } from './units';
 
 const tabs = [
   { id: 'live', label: 'Power Monitor' },
@@ -103,6 +104,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [windowSeconds, setWindowSeconds] = useState(5);
+  // Global display unit for all power plots (data stays in watts underneath).
+  const [powerUnit, setPowerUnit] = useState<PowerUnit>(() => loadPowerUnit());
+  const selectPowerUnit = (u: PowerUnit) => {
+    setPowerUnit(u);
+    savePowerUnit(u);
+  };
   const [maximized, setMaximized] = useState<boolean>(false);
   const [devices, setDevices] = useState<DeviceStatus[]>([]);
   const [activeDeviceId, setActiveDeviceId] = useState<string | null>(null);
@@ -273,6 +280,20 @@ export default function App() {
           </div>
         </div>
         <div className="topbar-right window-no-drag">
+          <div className="unit-toggle" title="Global power display unit">
+            <button
+              className={`unit-btn ${powerUnit === 'w' ? 'active' : ''}`}
+              onClick={() => selectPowerUnit('w')}
+            >
+              W
+            </button>
+            <button
+              className={`unit-btn ${powerUnit === 'dbm' ? 'active' : ''}`}
+              onClick={() => selectPowerUnit('dbm')}
+            >
+              dBm
+            </button>
+          </div>
           <div className={`status ${connected ? 'ok' : 'idle'}`}>
             <span className="status-dot" />
             {connected
@@ -429,6 +450,7 @@ export default function App() {
           <div className={`tab-pane${activeTab === 'live' ? '' : ' tab-pane-hidden'}`}>
             <LivePlot
               windowSeconds={windowSeconds}
+              powerUnit={powerUnit}
               devices={devices}
               activeDeviceId={activeDeviceId}
               onSelectDevice={selectActiveDevice}
@@ -440,6 +462,7 @@ export default function App() {
           </div>
           <div className={`tab-pane${activeTab === 'capture' ? '' : ' tab-pane-hidden'}`}>
             <CaptureTab
+              powerUnit={powerUnit}
               connected={connected}
               devices={devices}
               activeDeviceId={activeDeviceId}

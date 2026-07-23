@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import LiveChart from '@/components/LiveChart';
 import { ControlMsg, DeviceStatus, gainDisplayLabel, sendControl, subscribeControl, subscribeStatus, subscribeStream } from '@/coredaqClient';
 import { VirtualChannelDef, VirtualMathType } from '@/virtualChannels';
+import { PowerUnit, pointsToDbm } from '@/units';
 
 const CHANNEL_COLORS = [
   '#4DD0E1',
@@ -84,6 +85,7 @@ type PowerScale = {
 
 type Props = {
   windowSeconds: number;
+  powerUnit: PowerUnit;
   devices: DeviceStatus[];
   activeDeviceId: string | null;
   onSelectDevice: (deviceId: string) => void;
@@ -122,6 +124,7 @@ function emptySeries(): ChannelSeries {
 
 export default function LivePlot({
   windowSeconds,
+  powerUnit,
   devices,
   activeDeviceId,
   onSelectDevice,
@@ -539,13 +542,17 @@ export default function LivePlot({
       if (def.type === 'math' && def.mathType === 'db') {
         return { ...def, unit: 'dB', latest, points: decimateMinMax(base.x, base.y, CHART_MAX_POINTS) };
       }
-      const scale = pickPowerScale(base.y);
       const pts = decimateMinMax(base.x, base.y, CHART_MAX_POINTS);
+      if (powerUnit === 'dbm') {
+        // Global dBm display: convert the decimated watts in place.
+        return { ...def, unit: 'dBm', latest, points: pointsToDbm(pts) };
+      }
+      const scale = pickPowerScale(base.y);
       for (let i = 0; i < pts.length; i += 1) pts[i][1] *= scale.factor;
       return { ...def, unit: scale.unit, latest, points: pts };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, chartTick]);
+  }, [active, chartTick, powerUnit]);
 
   const clearSeries = () => {
     t0Ref.current = {};

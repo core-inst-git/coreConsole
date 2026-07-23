@@ -2,8 +2,10 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import CaptureMiniChart, { ZoomWindow } from '@/components/CaptureMiniChart';
 import { DeviceStatus, gainDisplayLabel, sendControl, subscribeControl, subscribeStatus } from '@/coredaqClient';
 import { VirtualChannelDef, VirtualMathType, parsePhysicalSourceId, physicalSourceId } from '@/virtualChannels';
+import { PowerUnit, pointsToDbm } from '@/units';
 
 type Props = {
+  powerUnit: PowerUnit;
   connected: boolean;
   devices: DeviceStatus[];
   activeDeviceId: string | null;
@@ -199,6 +201,7 @@ function pickPowerScale(dataW: number[]): { factor: number; unit: string } {
 }
 
 export default function CaptureTab({
+  powerUnit,
   connected,
   devices,
   activeDeviceId,
@@ -743,11 +746,13 @@ export default function CaptureTab({
         const len = Math.min(sweepX.length, yRaw.length);
         const yTrim = yRaw.slice(0, len);
         const xTrim = sweepX.slice(0, len);
-        const scale = pickPowerScale(yTrim);
         const points: Point[] = new Array(len);
-        for (let i = 0; i < len; i += 1) {
-          points[i] = [xTrim[i], yTrim[i] * scale.factor];
+        for (let i = 0; i < len; i += 1) points[i] = [xTrim[i], yTrim[i]];
+        if (powerUnit === 'dbm') {
+          return { ...def, points: pointsToDbm(points), unit: 'dBm' };
         }
+        const scale = pickPowerScale(yTrim);
+        for (let i = 0; i < len; i += 1) points[i][1] *= scale.factor;
         return { ...def, points, unit: scale.unit };
       }
 
@@ -761,14 +766,16 @@ export default function CaptureTab({
         return { ...def, points, unit: 'dB' };
       }
 
-      const scale = pickPowerScale(yTrim);
       const points: Point[] = new Array(len);
-      for (let i = 0; i < len; i += 1) {
-        points[i] = [xTrim[i], yTrim[i] * scale.factor];
+      for (let i = 0; i < len; i += 1) points[i] = [xTrim[i], yTrim[i]];
+      if (powerUnit === 'dbm') {
+        return { ...def, points: pointsToDbm(points), unit: 'dBm' };
       }
+      const scale = pickPowerScale(yTrim);
+      for (let i = 0; i < len; i += 1) points[i][1] *= scale.factor;
       return { ...def, points, unit: scale.unit };
     });
-  }, [active, sweepX, physY]);
+  }, [active, sweepX, physY, powerUnit]);
 
   // Zoom → ask the backend to re-decimate just the visible window from its
   // full-resolution store. All cards share one x-axis (charts are connected),

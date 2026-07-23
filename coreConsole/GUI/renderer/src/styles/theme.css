@@ -118,6 +118,36 @@ h3,
   text-shadow: 0 0 12px rgba(95, 224, 238, 0.35);
 }
 
+.unit-toggle {
+  display: inline-flex;
+  border: 1px solid var(--stroke-strong);
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(9, 11, 16, 0.72);
+}
+
+.unit-btn {
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-body);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  padding: 6px 12px;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.unit-btn:hover {
+  color: var(--text);
+}
+
+.unit-btn.active {
+  background: rgba(95, 224, 238, 0.14);
+  color: var(--accent);
+}
+
 .status {
   display: inline-flex;
   align-items: center;
