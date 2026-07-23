@@ -1218,6 +1218,41 @@ class CoreDAQBackend:
         except ImportError:
             debug.append("FTDI scan unavailable: pyusb/libusb missing "
                          "(mac: brew install libusb; win: Zadig WinUSB driver)")
+
+        # Santec TSL over USB is an FTDI *virtual COM port* on Windows (and
+        # /dev/tty.usbserial-* on mac) — probe FTDI-vendor serial ports with
+        # the Santec framing. coreDAQ's own ports (STM32 CDC 0483:5740) and
+        # ports held by live sessions are never touched.
+        try:
+            from serial.tools import list_ports
+            held_ports = set(self.port_to_device.keys())
+            found_serial = False
+            for p in list_ports.comports():
+                if time.monotonic() > deadline:
+                    debug.append("serial scan hit timeout; partial results")
+                    break
+                if p.device in held_ports:
+                    continue
+                if (p.vid, p.pid) == (0x0483, 0x5740):
+                    continue  # a coreDAQ — never probe with laser framing
+                if p.vid != 0x0403:
+                    continue  # not an FTDI chip -> not a Santec VCP
+                res = f"ftdi://SANTEC:{p.device}"
+                if res in seen:
+                    continue
+                try:
+                    row = probe_resource(res, timeout_s=2.0)
+                    rows.append(row)
+                    seen.add(res)
+                    found_serial = True
+                except LaserError as err:
+                    debug.append(f"{p.device}: {err}")
+            if not found_serial:
+                debug.append(
+                    "serial scan: no Santec VCP lasers answered "
+                    "(FTDI-vendor COM ports are probed automatically)")
+        except Exception as err:
+            debug.append(f"serial scan unavailable: {err}")
         return rows, debug
 
     async def _run_real_sweep(self, ws: Any, sess: Session, data: dict) -> None:
