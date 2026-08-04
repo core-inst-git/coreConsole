@@ -1,0 +1,27 @@
+coreConsole Windows Setup
+
+1) Open PowerShell or Command Prompt
+2) cd <path>\coreConsole
+3) Install/use Node 20 LTS:
+
+nvm install 20.20.0
+nvm use 20.20.0
+node -v
+npm -v
+
+4) Install dependencies:
+
+npm install
+npm --prefix GUI install
+npm --prefix packages\visa-addon install
+npm --prefix packages\visa-addon run build
+npm --prefix packages\visa-service install
+
+5) Optional VISA smoke tests:
+
+npm run visa:smoke:mock
+npm run visa:smoke
+
+6) Run app:
+
+npm run dev

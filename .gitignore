@@ -1,0 +1,24 @@
+# Node
+**/node_modules/
+
+# Build artifacts
+GUI/renderer/dist/
+GUI/release/
+GUI/dist/
+GUI/build/
+GUI/.electron-cache/
+GUI/backend/dist/
+GUI/backend/build/
+GUI/backend/bin/
+release-artifacts/
+
+# Python
+**/__pycache__/
+*.py[cod]
+
+# OS / editor
+.DS_Store
+
+# temp datasheet render artifacts
+.tmp_datasheet_assets/
+.tmp_datasheet_preview/
